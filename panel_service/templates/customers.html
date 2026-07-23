@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Mijozlar — Kupon Nazorat{% endblock %}
+{% block content %}
+<h2>Mijozlar (CRM ko'rinishi, TZ 11.6)</h2>
+<form class="filters" method="get" action="/customers">
+  <input type="text" name="search" placeholder="Nomer / username / ism" value="{{ search or '' }}">
+  <button type="submit">Qidirish</button>
+</form>
+
+<table>
+  <thead>
+    <tr><th>#</th><th>Ism</th><th>Username</th><th>Nomer</th><th>Holat</th><th>Oxirgi ko'rilgan</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for user in customers %}
+    <tr>
+      <td>{{ user.id }}</td>
+      <td>{{ user.display_name or '—' }}</td>
+      <td>{{ '@' + user.tg_username if user.tg_username else '—' }}</td>
+      <td>{{ user.phone or '—' }}</td>
+      <td>
+        {% if user.is_blocked %}<span class="badge bad">bloklangan</span>
+        {% elif not user.is_safe %}<span class="badge warn">shubhali</span>
+        {% else %}<span class="badge ok">xavfsiz</span>{% endif %}
+      </td>
+      <td>{{ user.last_seen }}</td>
+      <td><a class="link" href="/customers/{{ user.id }}">Batafsil</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">Hech narsa topilmadi.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

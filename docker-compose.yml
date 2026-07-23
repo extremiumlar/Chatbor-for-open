@@ -1,0 +1,54 @@
+# TZ 13.1 — teleton-service va adminbot-service alohida jarayon, bitta
+# SQLite baza va bitta kod bazasini (image) baham ko'radi.
+#
+# Ishlatish:
+#   cp .env.example .env   # to'ldiring (API_ID/API_HASH/ADMINBOT_TOKEN/ADMIN_TG_IDS)
+#   docker compose up --build
+#
+# Birinchi marta Telethon akkauntga ulanish (interaktiv, kod so'raydi) uchun:
+#   docker compose run --rm -it teleton python login.py
+#
+# ESLATMA: bu fayl ushbu ishlab chiqish muhitida (Docker o'rnatilmagan)
+# qurilmagan/sinovdan o'tkazilmagan — standart, keng tarqalgan konfiguratsiya,
+# lekin ishlatishdan oldin o'zingiz `docker compose up --build` bilan
+# tekshirib ko'ring.
+
+services:
+  teleton:
+    build: .
+    command: python -m teleton_service.relay
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/data_relay.db
+      SESSION_NAME: /app/data/my_account
+      LOG_DIR: /app/data/logs
+      BACKUP_DIR: /app/data/backups
+    volumes:
+      - data:/app/data
+    restart: unless-stopped
+
+  adminbot:
+    build: .
+    command: python -m adminbot_service.bot
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/data_relay.db
+      LOG_DIR: /app/data/logs
+    volumes:
+      - data:/app/data
+    restart: unless-stopped
+
+  panel:
+    build: .
+    command: uvicorn panel_service.app:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/data_relay.db
+    volumes:
+      - data:/app/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  data:

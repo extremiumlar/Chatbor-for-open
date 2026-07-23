@@ -1,0 +1,10 @@
+.env
+*.session
+*.session-journal
+__pycache__/
+*.db
+.pytest_cache/
+logs/
+backups/
+.git/
+.claude/

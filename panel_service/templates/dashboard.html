@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Kupon Nazorat{% endblock %}
+{% block content %}
+<h2>Statistika (TZ 10-bo'lim)</h2>
+<div class="stat-row">
+  <div class="stat">
+    <div class="value">{{ stats.today_count }}</div>
+    <div class="label">Bugungi murojaatlar</div>
+  </div>
+  <div class="stat">
+    <div class="value">{{ stats.problem_count }}</div>
+    <div class="label">Muammoli holatlar (joriy ochiq)</div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Holat bo'yicha (barcha vaqt)</h3>
+  <table>
+    <thead><tr><th>Status</th><th>Son</th></tr></thead>
+    <tbody>
+      {% for status, count in stats.by_status.items() %}
+      <tr><td>{{ status }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="font-size:12px;color:#6b7280;margin-top:10px;">
+    Eslatma: har admin/lichka bo'yicha alohida taqsimot ko'p akkaunt qo'shilganda
+    (MVP-5/6'dan keyingi haqiqiy ko'p-akkaunt ishga tushishi bilan) qo'shiladi.
+  </p>
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}Kupon Nazorat Paneli{% endblock %}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #1a1a1a; }
+    nav { background: #1f2937; padding: 12px 24px; display: flex; gap: 20px; align-items: center; }
+    nav a { color: #e5e7eb; text-decoration: none; font-size: 14px; }
+    nav a:hover { color: #fff; text-decoration: underline; }
+    nav .brand { font-weight: 600; color: #fff; margin-right: 12px; }
+    nav .spacer { flex: 1; }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    th, td { padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: left; font-size: 14px; }
+    th { background: #f3f4f6; }
+    .card { background: #fff; padding: 16px 20px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 16px; }
+    .stat-row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .stat { background: #fff; padding: 16px 20px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.08); min-width: 140px; }
+    .stat .value { font-size: 28px; font-weight: 700; }
+    .stat .label { font-size: 13px; color: #6b7280; }
+    form.filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    form.filters input, form.filters select { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 4px; }
+    form.filters button { padding: 6px 14px; border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: #e5e7eb; }
+    .badge.ok { background: #d1fae5; color: #065f46; }
+    .badge.bad { background: #fee2e2; color: #991b1b; }
+    .badge.warn { background: #fef3c7; color: #92400e; }
+    a.link { color: #2563eb; text-decoration: none; }
+    a.link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Kupon Nazorat</span>
+    <a href="/">Dashboard</a>
+    <a href="/cases">Murojaatlar</a>
+    <a href="/customers">Mijozlar</a>
+    <a href="/audit">Audit</a>
+    <span class="spacer"></span>
+    <a href="/logout">Chiqish</a>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Murojaatlar — Kupon Nazorat{% endblock %}
+{% block content %}
+<h2>Murojaatlar (TZ 11.6 — qidiruv/filtr)</h2>
+<form class="filters" method="get" action="/cases">
+  <input type="text" name="phone" placeholder="Nomer" value="{{ filters.phone or '' }}">
+  <select name="status">
+    <option value="">— barcha statuslar —</option>
+    {% for s in all_statuses %}
+    <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <input type="date" name="date_from" value="{{ filters.date_from or '' }}">
+  <input type="date" name="date_to" value="{{ filters.date_to or '' }}">
+  <button type="submit">Filtrlash</button>
+</form>
+
+<table>
+  <thead><tr><th>#</th><th>Nomer</th><th>Status</th><th>Bot</th><th>Yaratildi</th><th></th></tr></thead>
+  <tbody>
+    {% for case in cases %}
+    <tr>
+      <td>{{ case.id }}</td>
+      <td>{{ case.phone }}</td>
+      <td><span class="badge">{{ case.status.value }}</span></td>
+      <td>{{ case.bot_id or '—' }}</td>
+      <td>{{ case.created_at }}</td>
+      <td><a class="link" href="/cases/{{ case.id }}">Batafsil</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Hech narsa topilmadi.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

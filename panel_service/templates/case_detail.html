@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Case #{{ case.id }} — Kupon Nazorat{% endblock %}
+{% block content %}
+<p><a class="link" href="/cases">&larr; Murojaatlarga qaytish</a></p>
+<div class="card">
+  <h2>Case #{{ case.id }} — {{ case.phone }}</h2>
+  <p>Status: <span class="badge">{{ case.status.value }}</span></p>
+  <p>Yaratildi: {{ case.created_at }}</p>
+  <p>Tasdiqlandi: {{ case.confirmed_at or '—' }}</p>
+  <p>Bot ID: {{ case.bot_id or '—' }}</p>
+  <p>EXPIRED urinishlar: {{ case.expired_attempts }}</p>
+  <p>Mijoz: <a class="link" href="/customers/{{ case.user_id }}">#{{ case.user_id }}</a></p>
+</div>
+
+<div class="card">
+  <h3>Kupon urinishlari tarixi (Q61)</h3>
+  <table>
+    <thead><tr><th>Kupon</th><th>Natija</th><th>Bot</th><th>Vaqt</th></tr></thead>
+    <tbody>
+      {% for a in attempts %}
+      <tr>
+        <td>{{ a.coupon }}</td>
+        <td><span class="badge">{{ a.result.value }}</span></td>
+        <td>{{ a.bot_id }}</td>
+        <td>{{ a.created_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4">Kupon urinishi yo'q.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

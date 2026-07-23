@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Audit — Kupon Nazorat{% endblock %}
+{% block content %}
+<h2>So'nggi admin harakatlari (TZ 11.5, 12.2)</h2>
+<table>
+  <thead><tr><th>Vaqt</th><th>Admin (tg_id)</th><th>Harakat</th><th>Tafsilot</th></tr></thead>
+  <tbody>
+    {% for e in entries %}
+    <tr>
+      <td>{{ e.created_at }}</td>
+      <td>{{ e.admin_tg_id }}</td>
+      <td>{{ e.action }}</td>
+      <td>{{ e.details }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">Hali hech qanday admin harakati qayd etilmagan.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

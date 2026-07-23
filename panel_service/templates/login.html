@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <title>Kirish — Kupon Nazorat Paneli</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f6f8; display: flex; align-items: center;
+           justify-content: center; height: 100vh; margin: 0; }
+    .box { background: #fff; padding: 32px 40px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1); text-align: center; }
+    h1 { font-size: 18px; margin-bottom: 20px; }
+    .note { font-size: 12px; color: #6b7280; margin-top: 16px; max-width: 320px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Kupon Nazorat Paneli</h1>
+    {% if bot_username %}
+    <script async src="https://telegram.org/js/telegram-widget.js?22"
+      data-telegram-login="{{ bot_username }}"
+      data-size="large"
+      data-auth-url="/auth/telegram"
+      data-request-access="write"></script>
+    <p class="note">
+      Faqat <code>admins</code> jadvalidagi Telegram ID-lar kira oladi (TZ 12.2).
+      ⚠️ Bu kirish tugmasi ishlashi uchun bot @BotFather'da <code>/setdomain</code>
+      orqali shu sahifa xizmat qilayotgan REAL HTTPS domenga bog'langan bo'lishi shart.
+    </p>
+    {% else %}
+    <p class="note">
+      ADMINBOT_USERNAME .env'da sozlanmagan — Telegram kirish tugmasi ko'rsatib
+      bo'lmaydi. .env faylida <code>ADMINBOT_USERNAME</code>ni to'ldiring.
+    </p>
+    {% endif %}
+  </div>
+</body>
+</html>

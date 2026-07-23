@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Mijoz #{{ user.id }} — Kupon Nazorat{% endblock %}
+{% block content %}
+<p><a class="link" href="/customers">&larr; Mijozlarga qaytish</a></p>
+<div class="card">
+  <h2>{{ user.display_name or ('@' + user.tg_username if user.tg_username else 'Mijoz #' ~ user.id) }}</h2>
+  <p>Telegram ID: {{ user.tg_user_id }}</p>
+  <p>Username: {{ '@' + user.tg_username if user.tg_username else '—' }}</p>
+  <p>Oxirgi nomer: {{ user.phone or '—' }}</p>
+  <p>Holat:
+    {% if user.is_blocked %}<span class="badge bad">bloklangan</span>
+    {% elif not user.is_safe %}<span class="badge warn">shubhali (admin tekshiruvi kutilmoqda)</span>
+    {% else %}<span class="badge ok">xavfsiz</span>{% endif %}
+  </p>
+  <p>Birinchi ko'rilgan: {{ user.first_seen }}</p>
+  <p>Oxirgi ko'rilgan: {{ user.last_seen }}</p>
+  <p>Izoh: {{ user.note or '—' }}</p>
+</div>
+
+<div class="card">
+  <h3>Murojaatlar tarixi ({{ cases|length }})</h3>
+  <table>
+    <thead><tr><th>#</th><th>Nomer</th><th>Status</th><th>Yaratildi</th><th></th></tr></thead>
+    <tbody>
+      {% for case in cases %}
+      <tr>
+        <td>{{ case.id }}</td>
+        <td>{{ case.phone }}</td>
+        <td><span class="badge">{{ case.status.value }}</span></td>
+        <td>{{ case.created_at }}</td>
+        <td><a class="link" href="/cases/{{ case.id }}">Batafsil</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">Murojaat yo'q.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
