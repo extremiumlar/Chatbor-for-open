@@ -118,6 +118,18 @@ async def test_list_bots_returns_all_seeded_bots(session_factory, seed_bots):
         assert sorted(b.username for b in bots) == ["b1", "b2", "b3"]
 
 
+async def test_seeding_same_username_twice_in_one_list_does_not_crash(session_factory, seed_bots):
+    # Regressiya: .env'da BOT_POOL_USERNAMES bitta botni bir necha marta
+    # sanab o'tishi mumkin — bu holat `bots.username` UNIQUE cheklovini
+    # buzib, Teleton ishga tushishida IntegrityError bergan edi.
+    await seed_bots(["same_bot", "same_bot", "same_bot"])
+    await seed_bots(["same_bot"])  # takroriy chaqiruv ham xato bermasligi kerak
+
+    async with session_factory() as session:
+        bots = await list_bots(session)
+        assert [b.username for b in bots] == ["same_bot"]
+
+
 # --------------------------------------------------------------------------- #
 # case_manager: shablon o'zgarishi mijozga darhol ta'sir qiladi
 # --------------------------------------------------------------------------- #

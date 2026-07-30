@@ -108,6 +108,16 @@ class Case(Base):
     # ketma-ket EXPIRED bo'lsa NEEDS_ADMIN'ga o'tadi (MVP-3).
     expired_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
+    # TZ 9.3 ("Qayta uzatish") — Adminbot Telethon'ga ega emas, shuning uchun
+    # o'zi dispatch qila olmaydi. Admin "Qayta uzatish"ni bosganda shu bayroq
+    # qo'yiladi, Teleton'ning fon kuzatuvchisi ko'rib dispatch qiladi va
+    # bayroqni tozalaydi (SUSPICIOUS_HOLD -> is_safe bilan bir xil naqsh).
+    # Aynan shu maqsadli bayroq ishlatiladi, NUMBER_RECEIVED holatini kuzatish
+    # emas — chunki pool navbati Teleton jarayonining XOTIRASIDA, va o'sha
+    # navbatda turgan case'lar ham NUMBER_RECEIVED bo'lib, ikki marta
+    # dispatch qilinib ketardi.
+    admin_redispatch_requested: Mapped[bool] = mapped_column(default=False)
+
     confirmed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime.datetime] = mapped_column(

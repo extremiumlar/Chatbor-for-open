@@ -117,6 +117,36 @@ async def _suspicious_resume_watcher() -> None:
             log.exception("Shubhali case'larni qayta ishga tushirishda xato")
 
 
+async def _admin_redispatch_watcher() -> None:
+    """TZ 9.3 ("Qayta uzatish") — Adminbot qo'ygan bayroqni ko'rib dispatch qiladi.
+
+    Adminbot Telethon'ga ega emas, shuning uchun o'zi botga yubora olmaydi va
+    mijozga yoza olmaydi (TZ 13.1) — u faqat `admin_redispatch_requested`
+    bayrog'ini qo'yadi, haqiqiy ishni shu yerda Teleton bajaradi.
+    """
+    while True:
+        await asyncio.sleep(settings.suspicious_resume_poll_seconds)
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    select(Case, User)
+                    .join(User, Case.user_id == User.id)
+                    .where(Case.admin_redispatch_requested.is_(True))
+                )
+                for case, user in result.all():
+                    # Bayroq DISPATCHDAN OLDIN tozalanadi — aks holda dispatch
+                    # paytida xato chiqsa, keyingi aylanishda cheksiz takrorlanardi.
+                    case.admin_redispatch_requested = False
+                    await session.commit()
+
+                    outcome = await case_manager.redispatch_queued_case(session, case)
+                    if outcome.customer_text:
+                        await client.send_message(user.tg_user_id, outcome.customer_text)
+                    log.info("Admin so'rovi bo'yicha case #%s qayta uzatildi.", case.id)
+        except Exception:
+            log.exception("Admin so'ragan qayta uzatishda xato")
+
+
 async def main() -> None:
     await init_db()
     async with get_session() as session:
@@ -152,20 +182,23 @@ async def main() -> None:
     # TZ 12-bo'lim (Q37) — qayta ishga tushganda yarim qolgan case'larni ko'rib chiqish.
     await reconcile_after_restart(case_manager, get_session, notifier.send, _notify_customer)
 
-    watcher_task = asyncio.create_task(_suspicious_resume_watcher())
-    backup_task = asyncio.create_task(
-        daily_backup_loop(
-            settings.database_url,
-            settings.backup_dir,
-            settings.backup_interval_seconds,
-            settings.backup_retention,
-        )
-    )
+    background_tasks = [
+        asyncio.create_task(_suspicious_resume_watcher()),
+        asyncio.create_task(_admin_redispatch_watcher()),
+        asyncio.create_task(
+            daily_backup_loop(
+                settings.database_url,
+                settings.backup_dir,
+                settings.backup_interval_seconds,
+                settings.backup_retention,
+            )
+        ),
+    ]
     try:
         await client.run_until_disconnected()
     finally:
-        watcher_task.cancel()
-        backup_task.cancel()
+        for task in background_tasks:
+            task.cancel()
 
 
 if __name__ == "__main__":

@@ -17,14 +17,25 @@ from core.models import Bot
 
 OnAssigned = Callable[[int, int], Awaitable[None]]
 
+# TZ 9.5 (Q53) — bot bilan nomer yuborish formatlari. `core.logic.phone.format_for_bot`
+# aynan shu uchtasini qo'llab-quvvatlaydi, shuning uchun ro'yxat shu yerda qat'iy.
+PHONE_FORMATS = ("+998XXXXXXXXX", "998XXXXXXXXX", "XXXXXXXXX")
+
 
 async def ensure_bots_seeded(session: AsyncSession, usernames: list[str]) -> None:
-    """Test/mock muhitda pool'ni berilgan username'lar bilan to'ldiradi (idempotent)."""
+    """Pool'ni berilgan username'lar bilan to'ldiradi (idempotent).
+
+    `existing`ga har qo'shilgandan keyin ham yoziladi — aks holda kiruvchi
+    ro'yxatning O'ZIDA takror username bo'lsa (masalan .env'da bitta bot
+    uch marta yozilgan bo'lsa) bir xil qatorni ikki marta INSERT qilib,
+    `bots.username` UNIQUE cheklovini buzardi.
+    """
     result = await session.execute(select(Bot.username))
     existing = {row[0] for row in result.all()}
     for username in usernames:
         if username not in existing:
             session.add(Bot(username=username))
+            existing.add(username)
     await session.commit()
 
 
@@ -60,6 +71,36 @@ async def add_bot(
     session.add(bot)
     await session.commit()
     await session.refresh(bot)
+    return bot
+
+
+async def get_bot(session: AsyncSession, bot_id: int) -> Bot | None:
+    return await session.get(Bot, bot_id)
+
+
+async def set_bot_active(session: AsyncSession, bot_id: int, is_active: bool) -> Bot | None:
+    """TZ 3.3 — botni yoqish / o'chirish (vaqtincha to'xtatish).
+
+    O'chirilgan bot `_select_free_bot`da tanlanmaydi, lekin joriy case'i
+    (agar band bo'lsa) majburan uzilmaydi — u tabiiy yakunlanadi.
+    """
+    bot = await session.get(Bot, bot_id)
+    if bot is None:
+        return None
+    bot.is_active = is_active
+    await session.commit()
+    return bot
+
+
+async def set_bot_phone_format(session: AsyncSession, bot_id: int, phone_format: str) -> Bot | None:
+    """TZ 9.5 (Q53) — bot qo'shilgandan keyin ham formatni o'zgartirish."""
+    if phone_format not in PHONE_FORMATS:
+        raise ValueError(f"Noma'lum format: {phone_format}")
+    bot = await session.get(Bot, bot_id)
+    if bot is None:
+        return None
+    bot.phone_format = phone_format
+    await session.commit()
     return bot
 
 

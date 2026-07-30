@@ -355,23 +355,35 @@ Mock bot standart test kuponlari (`teleton_service/mock_bot.py`):
 | `333333` | REJECTED   |
 | boshqa har qanday 6 xonali | REJECTED ("topilmadi") |
 
-## Adminbot buyruqlari
+## Adminbot — TUGMALI interfeys
 
-| Buyruq | Vazifa |
+Adminlar hech qanday buyruq sintaksisini eslab qolmasligi kerak. Pastda
+**doimiy menyu** (ReplyKeyboard), ro'yxatlar va amallar xabar ostidagi
+**inline tugmalar** orqali. Qiymat kerak bo'lganda bot o'zi so'raydi (FSM),
+admin faqat javob yozadi.
+
+```
+📊 Statistika      ⚠️ Muammolar
+🤖 Botlar          ⏳ Navbat
+📝 Shablonlar      🔍 Nomer qidirish
+⚙️ Sozlamalar      ℹ️ Yordam
+```
+
+| Bo'lim | Ichida nima bor |
 |---|---|
-| `drop find <nomer>` | Nomer bo'yicha holat + kupon tarixi |
-| `/bots` | Tekshiruv botlari ro'yxati va holati |
-| `/addbot <username> [format] [start]` | Yangi tekshiruv bot qo'shish (`start` — avval `/start` yuborilsin, Q54) |
-| `/templates` | Mijozga yuboriladigan shablonlarni ko'rish |
-| `/settemplate <KEY> <matn>` | Shablonni o'zgartirish |
-| `/botpatterns` | Bot-TANISH shablonlarini ko'rish (mijozga yuborilmaydi, TZ 7.1) |
-| `/setbotpattern <KEY> <matn>` | Bot-tanish shablonini o'zgartirish |
-| `/notify` | Bildirishnoma rejimini ko'rish/o'zgartirish (oddiy/batafsil) |
-| `/pending` | Navbatda turgan murojaatlar |
-| `/problems` | Admin e'tiborini talab qiladigan murojaatlar |
-| `/stats` | Statistika (TZ 10-bo'lim) |
-| `/audit` | So'nggi 20 ta admin harakati |
-| *(inline)* ✅ Xavfsiz / 🚫 Bloklash | Shubhali-holat xabarida — TZ 5.2, 9.3 |
+| 📊 **Statistika** | Bugungi murojaatlar, holatlar bo'yicha sonlar (TZ 10) |
+| ⚠️ **Muammolar** | Sahifalangan ro'yxat → case kartochkasi → **✅ Tasdiqlash / ❌ Rad etish / 🔄 Qayta uzatish** (TZ 9.3), shubhali holatda **✅ Xavfsiz / 🚫 Bloklash** (5.2), 👤 mijoz kartochkasi, 💬 lichkaga o'tish |
+| 🤖 **Botlar** | Har bot holati (🟢 bo'sh / 🔴 band / ⏸ o'chirilgan) → **⏸ vaqtincha o'chirish / ▶️ yoqish** (3.3), **📱 nomer formatini o'zgartirish** (9.5), **🔄 majburan bo'shatish** (12), **➕ yangi bot qo'shish** (username → format → `/start` kerakmi — hammasi tugma bilan) |
+| ⏳ **Navbat** | Bo'sh bot kutayotgan murojaatlar |
+| 📝 **Shablonlar** | 💬 mijozga yuboriladigan (7.2, 8 ta) va 🤖 bot javobini tanish (7.1, 4 ta) — **alohida** (Q47). Kalitni bosib ko'rasiz, ✏️ bosib o'zgartirasiz |
+| 🔍 **Nomer qidirish** | Tugmani bosib nomer yuborasiz. Yoki shunchaki nomerni yuborsangiz ham qidiradi |
+| ⚙️ **Sozlamalar** | 🔔 bildirishnoma rejimi (9.1), 📋 audit (11.5), 🔧 tizim holati |
+| 👤 **Mijoz kartochkasi** | 🚫 bloklash / ✅ blokdan chiqarish, ✅ xavfsiz deb belgilash, **📝 izoh yozish** (CRM, 11.1), murojaatlar tarixi |
+
+**Eski buyruqlar ham ishlashda davom etadi** (tezkor ishlatish uchun):
+`/bots`, `/addbot`, `/templates`, `/settemplate`, `/botpatterns`,
+`/setbotpattern`, `/notify`, `/pending`, `/problems`, `/stats`, `/audit`,
+`drop find <nomer>`.
 
 ## Web panel sahifalari (MVP-6, faqat o'qish)
 
@@ -412,7 +424,7 @@ ko'ring** — standart, keng tarqalgan konfiguratsiya, lekin tasdiqlanmagan.
 pytest -v
 ```
 
-76 ta test:
+93 ta test:
 - Bot pool (band/bo'sh, LRU, navbat, `/addbot`/`/bots`, owner_admin_id scoping).
 - Holat mashinasi: tasdiq, rad, EXPIRED-qayta-urinish (bir xil nomer → shu
   case, farqli nomer → DUPLICATE_ACTIVE, 5x → NEEDS_ADMIN), dublikat-kupon
@@ -438,6 +450,10 @@ pytest -v
   qidiruv-filtr (nomer/status/sana), mijozlar qidiruvi+tarixi, FastAPI
   route'lari (autentifikatsiyasiz redirect, izolyatsiyalangan test bazasi
   bilan autentifikatsiyalangan sahifalar, 404 ishlovi).
+- Tugmali UI ortidagi admin amallari: botni yoqish/o'chirish (o'chirilgan bot
+  haqiqatan dispatch'dan chiqib ketishi), format o'zgarishi botga uzatilgan
+  nomerga ta'sir qilishi, qo'lda tasdiqlash/rad etish/qayta uzatish, blokdan
+  chiqarish, mijozga izoh, va `onupdate` ustunlari uchun refresh regressiyasi.
 
 Real Telegram'siz to'liq end-to-end stsenariyni tekshirish uchun uch usul
 qo'llanildi:
