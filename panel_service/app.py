@@ -22,12 +22,12 @@ from starlette.middleware.sessions import SessionMiddleware
 from core.config import settings
 from core.db import get_session
 from core.enums import CaseStatus
-from core.logic.admins import is_admin
+from core.logic.admins import can_see_everything, get_admin_by_tg_id, is_admin
 from core.logic.audit import list_recent
 from core.logic.case_search import search_cases
 from core.logic.customers import cases_for_user, list_customers
 from core.logic.stats import gather_stats
-from core.models import Case, CouponAttempt, User
+from core.models import Admin, Case, CouponAttempt, User
 from panel_service.auth import verify_telegram_auth
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -53,11 +53,20 @@ async def _not_authenticated_handler(request: Request, exc: NotAuthenticated) ->
     return RedirectResponse(url="/login")
 
 
-async def require_admin(request: Request) -> int:
+async def require_admin(request: Request, db: AsyncSession = Depends(get_db)) -> Admin:
+    """Audit O-4 — avval faqat sessiya borligini tekshirardi; admin
+    `admins` jadvalidan olib tashlansa ham eski sessiya orqali kirish
+    davom etardi. Endi har so'rovda jadval qayta tekshiriladi. Audit K-4 —
+    endi `int` emas, `Admin` qatorining o'zi qaytariladi (TZ 11.0/Q51
+    ko'rish-cheklashi uchun rol kerak)."""
     tg_user_id = request.session.get("tg_user_id")
     if tg_user_id is None:
         raise NotAuthenticated()
-    return tg_user_id
+    admin = await get_admin_by_tg_id(db, tg_user_id)
+    if admin is None:
+        request.session.clear()
+        raise NotAuthenticated()
+    return admin
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +109,7 @@ async def logout(request: Request) -> RedirectResponse:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(
-    request: Request, tg_user_id: int = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    request: Request, admin: Admin = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ) -> HTMLResponse:
     stats = await gather_stats(db)
     return templates.TemplateResponse(request, "dashboard.html", {"stats": stats})
@@ -113,7 +122,7 @@ async def dashboard(
 
 @app.get("/audit", response_class=HTMLResponse)
 async def audit_page(
-    request: Request, tg_user_id: int = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    request: Request, admin: Admin = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ) -> HTMLResponse:
     entries = await list_recent(db, limit=50)
     return templates.TemplateResponse(request, "audit.html", {"entries": entries})
@@ -127,7 +136,7 @@ async def audit_page(
 @app.get("/cases", response_class=HTMLResponse)
 async def cases_page(
     request: Request,
-    tg_user_id: int = Depends(require_admin),
+    admin: Admin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     phone: str | None = None,
     status: str | None = None,
@@ -138,8 +147,16 @@ async def cases_page(
     parsed_from = datetime.date.fromisoformat(date_from) if date_from else None
     parsed_to = datetime.date.fromisoformat(date_to) if date_to else None
 
+    # Audit K-4 (TZ 11.0, Q51) — oddiy admin faqat o'ziga biriktirilgan
+    # (yoki hali hech kimga biriktirilmagan) mijozlarning case'larini ko'radi.
     cases = await search_cases(
-        db, phone=phone or None, status=status_enum, date_from=parsed_from, date_to=parsed_to
+        db,
+        phone=phone or None,
+        status=status_enum,
+        date_from=parsed_from,
+        date_to=parsed_to,
+        viewer_admin_id=admin.id,
+        can_see_all=can_see_everything(admin),
     )
 
     return templates.TemplateResponse(
@@ -157,12 +174,18 @@ async def cases_page(
 async def case_detail_page(
     request: Request,
     case_id: int,
-    tg_user_id: int = Depends(require_admin),
+    admin: Admin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
     case = await db.get(Case, case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="Case topilmadi.")
+    if not can_see_everything(admin):
+        # Audit K-4 — boshqa adminga biriktirilgan mijozning case'i 404
+        # bilan bir xil javob qaytaradi (mavjudligini oshkor qilmaslik uchun).
+        owner = await db.get(User, case.user_id)
+        if owner is not None and owner.assigned_admin_id not in (None, admin.id):
+            raise HTTPException(status_code=404, detail="Case topilmadi.")
     attempts = (
         await db.execute(
             select(CouponAttempt).where(CouponAttempt.case_id == case_id).order_by(CouponAttempt.id)
@@ -180,11 +203,16 @@ async def case_detail_page(
 @app.get("/customers", response_class=HTMLResponse)
 async def customers_page(
     request: Request,
-    tg_user_id: int = Depends(require_admin),
+    admin: Admin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
     search: str | None = None,
 ) -> HTMLResponse:
-    customers = await list_customers(db, search=search or None)
+    customers = await list_customers(
+        db,
+        search=search or None,
+        viewer_admin_id=admin.id,
+        can_see_all=can_see_everything(admin),
+    )
     return templates.TemplateResponse(
         request, "customers.html", {"customers": customers, "search": search}
     )
@@ -194,11 +222,13 @@ async def customers_page(
 async def customer_detail_page(
     request: Request,
     user_id: int,
-    tg_user_id: int = Depends(require_admin),
+    admin: Admin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> HTMLResponse:
     user = await db.get(User, user_id)
     if user is None:
+        raise HTTPException(status_code=404, detail="Mijoz topilmadi.")
+    if not can_see_everything(admin) and user.assigned_admin_id not in (None, admin.id):
         raise HTTPException(status_code=404, detail="Mijoz topilmadi.")
     cases = await cases_for_user(db, user_id)
     return templates.TemplateResponse(request, "customer_detail.html", {"user": user, "cases": cases})

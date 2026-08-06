@@ -1,6 +1,7 @@
 telethon==1.44.0
 sqlalchemy>=2.0
 aiosqlite
+alembic>=1.13
 python-dotenv
 aiogram>=3.7,<4
 fastapi>=0.110

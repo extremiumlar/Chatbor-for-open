@@ -3,6 +3,7 @@
 *.session-journal
 __pycache__/
 *.db
+*.db.*.bak
 .pytest_cache/
 logs/
 backups/

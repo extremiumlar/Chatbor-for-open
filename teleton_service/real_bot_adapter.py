@@ -22,7 +22,7 @@ import logging
 
 from core.db import get_session
 from core.enums import CaseStatus
-from core.logic.bot_patterns import UnrecognizedBotResponseError, list_patterns, recognize
+from core.logic.bot_patterns import UnrecognizedBotResponseError, get_pattern, list_patterns, recognize
 from core.models import Bot
 
 log = logging.getLogger("real_bot_adapter")
@@ -54,7 +54,17 @@ class RealVerificationBotAdapter:
 
             await conv.send_message(phone)
             response = await conv.get_response()
-            return response.raw_text or ""
+            text = response.raw_text or ""
+
+        # Audit J-10 — avval bu javob HECH QANDAY tekshiruvsiz qabul
+        # qilinardi (faqat check_coupon o'z javobini shablonga solishtirardi).
+        # Agar real bot nomerga kutilmagan narsa bilan javob bersa (xatolik,
+        # yoki "allaqachon tasdiqlangan" kabi o'z-o'zidan yakunlovchi javob),
+        # tizim buni sezmay baribir mijozdan kupon so'rardi — bot tomonidagi
+        # haqiqiy anomaliyani yashirardi.
+        if not await self._matches(text, "COUPON_REQUEST"):
+            raise UnrecognizedBotResponseError(text)
+        return text
 
     async def check_coupon(self, bot: Bot, coupon: str) -> tuple[CaseStatus, str]:
         async with self._client.conversation(bot.username, timeout=_RESPONSE_TIMEOUT_SECONDS) as conv:
@@ -66,6 +76,11 @@ class RealVerificationBotAdapter:
         if status is None:
             raise UnrecognizedBotResponseError(text)
         return status, text
+
+    async def _matches(self, text: str, key: str) -> bool:
+        async with self._session_factory() as session:
+            pattern = await get_pattern(session, key)
+        return bool(pattern) and recognize(text, pattern)
 
     async def _classify(self, text: str) -> CaseStatus | None:
         async with self._session_factory() as session:

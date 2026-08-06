@@ -1,11 +1,12 @@
 """MVP-4: statistika, audit_log, restart reconciliation, kunlik backup."""
 
+import asyncio
 import os
 import sqlite3
 
 from core.enums import CaseStatus
 from core.logic.audit import list_recent, log_action
-from core.logic.backup import _prune_old_backups, backup_once
+from core.logic.backup import _prune_old_backups, backup_once, daily_backup_loop
 from core.logic.reconciliation import reconcile_after_restart
 from core.logic.stats import gather_stats
 from tests.test_case_state_machine import _bot_busy_count, _latest_case
@@ -206,3 +207,35 @@ async def test_backup_once_creates_restorable_copy(tmp_path):
 async def test_backup_once_returns_none_for_non_sqlite_url(tmp_path):
     dest = await backup_once("postgresql://user:pass@host/db", str(tmp_path / "backups"), retention=5)
     assert dest is None
+
+
+async def test_daily_backup_loop_pushes_alert_on_failure(tmp_path):
+    """Audit J-5 (TZ 12.1, Q42) — backup xato bersa, faqat log emas,
+    `alert_sink` orqali adminga ham darhol push qilinishi kerak."""
+    alerts = []
+
+    async def capture_alert(message: str, important: bool = True) -> None:
+        alerts.append((message, important))
+
+    # Noto'g'ri (Postgres) URL — backup_once None qaytaradi (xato emas),
+    # shuning uchun bevosita xato hosil qilish uchun database_url ni
+    # mavjud bo'lmagan (yozib bo'lmaydigan) yo'lga ko'rsatamiz.
+    bad_db_path = str(tmp_path / "no_such_dir" / "does_not_exist.db")
+
+    task = asyncio.create_task(
+        daily_backup_loop(
+            f"sqlite+aiosqlite:///{bad_db_path}",
+            str(tmp_path / "backups"),
+            interval_seconds=9999,
+            alert_sink=capture_alert,
+        )
+    )
+    await asyncio.sleep(0.2)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert alerts, "xato yuz berganda alert_sink chaqirilishi kerak edi"
+    assert alerts[0][1] is True  # important=True

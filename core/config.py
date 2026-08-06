@@ -115,5 +115,18 @@ class Settings:
     # bekor bo'ladi (dev uchun qabul qilinadi, production'da .env'da o'rnating).
     panel_session_secret: str = os.getenv("PANEL_SESSION_SECRET") or secrets.token_urlsafe(32)
 
+    # openbudget.uz ovozlar ro'yxati (kuponni saytdan tekshirish).
+    # `openbudget_vote_token` — captchani ODAM brauzerda yechganda hosil
+    # bo'ladigan token (`localStorage.initToken`); avtomatik olinmaydi va
+    # eskirganda API 410 qaytaradi, o'shanda qayta kiritish kerak.
+    openbudget_base_url: str = os.getenv("OPENBUDGET_BASE_URL", "https://openbudget.uz/api")
+    openbudget_initiative_id: str = os.getenv("OPENBUDGET_INITIATIVE_ID", "")
+    openbudget_vote_token: str = os.getenv("OPENBUDGET_VOTE_TOKEN", "")
+    # Standart 0 — token ~2 daqiqada eskiradi, pauza qancha uzun bo'lsa
+    # bitta token bilan shuncha kam sahifa o'qiladi (`TOKEN_TTL_SECONDS`).
+    openbudget_page_delay_seconds: float = field(
+        default_factory=lambda: _float_env("OPENBUDGET_PAGE_DELAY_SECONDS", 0.0)
+    )
+
 
 settings = Settings()
