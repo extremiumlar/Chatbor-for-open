@@ -4,7 +4,6 @@ avtomatlashtiradi (TZ 1-2-bo'lim, MVP-1: haqiqiy Telethon + mock tekshiruv bot).
 
 import asyncio
 import logging
-import re
 
 from sqlalchemy import select
 from telethon import TelegramClient, events
@@ -17,19 +16,19 @@ from core.logic.backup import daily_backup_loop
 from core.logic.bot_pool import ensure_bots_seeded
 from core.logic.bot_patterns import missing_patterns
 from core.logic.case_manager import CaseManager
+from core.logic.coupon import extract_coupon
 from core.logic.logging_setup import configure_logging
 from core.logic.notifier import AdminNotifier
 from core.logic.phone import extract_phone
 from core.logic.reconciliation import reconcile_after_restart
+from core.logic.settings_store import get_operator_codes
 from core.logic.templates import ensure_templates_seeded
-from core.models import Case, User
+from core.models import Bot, Case, User
 from teleton_service.mock_bot import MockVerificationBot
 from teleton_service.real_bot_adapter import RealVerificationBotAdapter
 
 configure_logging("teleton")
 log = logging.getLogger("relay")
-
-_COUPON_RE = re.compile(r"^\d{6}$")
 
 client = TelegramClient(settings.session_name, settings.api_id, settings.api_hash)
 notifier = AdminNotifier(session_factory=get_session, bot_token=settings.adminbot_token)
@@ -63,30 +62,61 @@ async def handle_private_message(event: events.NewMessage.Event) -> None:
 
     text = (event.raw_text or "").strip()
 
-    if not text:
+    try:
+        # Audit J-3 — media tekshiruvi endi CAPTION bor-yo'qligidan qat'i
+        # nazar birinchi bo'lib ishlaydi. Avval faqat `text` bo'sh bo'lganda
+        # (captionsiz rasm) tekshirilardi — mijoz rasmga biror izoh
+        # ("mana" va h.k.) qo'shsa, TZ 5.1 ogohlantirishi butunlay
+        # ishlamay, xabar to'liq e'tiborsiz qoldirilardi.
         if event.photo or event.video or event.document:
-            # TZ 5.1 — kupon o'rniga rasm/media kelsa.
             outcome = await case_manager.handle_non_text_coupon_input(
                 tg_user_id, tg_username, display_name
             )
             if outcome is not None and outcome.customer_text:
                 await event.reply(outcome.customer_text)
-        return
+            return
 
-    phone = extract_phone(text)
-    if phone is not None:
-        outcome = await case_manager.handle_phone_detected(tg_user_id, tg_username, display_name, phone)
-        if outcome.customer_text:
-            await event.reply(outcome.customer_text)
-        return
+        if not text:
+            return
 
-    if _COUPON_RE.match(text):
-        outcome = await case_manager.handle_coupon_received(tg_user_id, text)
-        if outcome is not None and outcome.customer_text:
-            await event.reply(outcome.customer_text)
-        return
+        # Audit J-9 (TZ 4.1) — operator kodlari ro'yxati endi Adminbot
+        # orqali jonli sozlanadi (`.env` faqat boshlang'ich qiymat);
+        # har xabarda joriy ro'yxat bazadan o'qiladi.
+        async with get_session() as session:
+            operator_codes = await get_operator_codes(session)
+        phone = extract_phone(text, operator_codes)
+        if phone is not None:
+            outcome = await case_manager.handle_phone_detected(
+                tg_user_id, tg_username, display_name, phone
+            )
+            if outcome.customer_text:
+                await event.reply(outcome.customer_text)
+            return
 
-    # Boshqa har qanday xabar — oddiy suhbat, tizim aralashmaydi.
+        # Audit J-2 — avval kupon faqat xabar AYNAN 6 ta raqamdan iborat
+        # bo'lsagina tanilardi; nomer aniqlash kabi matn ICHIDAN qidirilmasdi
+        # (TZ 1-bo'lim: mijoz "tabiiy suhbat" ichida yozadi). "kuponim
+        # 123456" yoki bo'shliqli "123 456" kabi xabarlar butunlay
+        # e'tiborsiz qoldirilardi.
+        coupon = extract_coupon(text)
+        if coupon is not None:
+            outcome = await case_manager.handle_coupon_received(tg_user_id, coupon)
+            if outcome is not None and outcome.customer_text:
+                await event.reply(outcome.customer_text)
+            return
+
+        # Boshqa har qanday xabar — oddiy suhbat, tizim aralashmaydi.
+    except Exception as exc:
+        # Audit J-5 — avval bu yerda umuman try/except yo'q edi: kutilmagan
+        # xato (masalan DB uzilishi) faqat Telethon'ning ichki logi orqali
+        # ko'rinardi, adminga HECH QANDAY push bormasdi — TZ 12.1 (Q42)
+        # "log HAM, kritik bo'lsa adminbotga push HAM" talabini buzardi.
+        log.exception("Mijoz xabarini qayta ishlashda kutilmagan xato (tg_id=%s)", tg_user_id)
+        await notifier.send(
+            f"KRITIK: mijoz xabarini qayta ishlashda kutilmagan xato (tg_id={tg_user_id}): "
+            f"{exc!r}",
+            important=True,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -113,8 +143,13 @@ async def _suspicious_resume_watcher() -> None:
                     outcome = await case_manager.resume_suspicious_case(session, case)
                     if outcome.customer_text:
                         await client.send_message(user.tg_user_id, outcome.customer_text)
-        except Exception:
+        except Exception as exc:
+            # Audit J-5 — TZ 12.1 (Q42): log HAM, kritik bo'lsa adminbotga
+            # push HAM. Avval faqat log yozilardi.
             log.exception("Shubhali case'larni qayta ishga tushirishda xato")
+            await notifier.send(
+                f"KRITIK: shubhali case'larni qayta ishga tushirishda xato: {exc!r}", important=True
+            )
 
 
 async def _admin_redispatch_watcher() -> None:
@@ -143,8 +178,36 @@ async def _admin_redispatch_watcher() -> None:
                     if outcome.customer_text:
                         await client.send_message(user.tg_user_id, outcome.customer_text)
                     log.info("Admin so'rovi bo'yicha case #%s qayta uzatildi.", case.id)
-        except Exception:
+        except Exception as exc:
+            # Audit J-5 — TZ 12.1 (Q42): log HAM, kritik bo'lsa adminbotga push HAM.
             log.exception("Admin so'ragan qayta uzatishda xato")
+            await notifier.send(
+                f"KRITIK: admin so'ragan qayta uzatishda xato: {exc!r}", important=True
+            )
+
+
+async def _force_release_watcher() -> None:
+    """Audit J-4 (TZ 12) — Adminbot "Majburan bo'shatish" bosganda qo'yadigan
+    `Bot.force_release_requested` bayrog'ini ko'rib, HAQIQIY (jarayon-ichidagi)
+    `case_manager.pool.force_release`ni chaqiradi — shu orqali navbatda
+    kutayotgan case (bo'lsa) darhol shu botga tayinlanadi, `admin_redispatch_requested`
+    bilan bir xil naqsh (Adminbot Telethon'ga ega emas, faqat bayroq qo'yadi).
+    """
+    while True:
+        await asyncio.sleep(settings.suspicious_resume_poll_seconds)
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    select(Bot).where(Bot.force_release_requested.is_(True))
+                )
+                for bot in result.scalars().all():
+                    bot.force_release_requested = False
+                    await session.commit()
+                    await case_manager.pool.force_release(session, bot.id)
+                    log.info("Admin so'rovi bo'yicha bot #%s majburan bo'shatildi.", bot.id)
+        except Exception as exc:
+            log.exception("Majburan bo'shatishda xato")
+            await notifier.send(f"KRITIK: bot majburan bo'shatishda xato: {exc!r}", important=True)
 
 
 async def main() -> None:
@@ -185,12 +248,14 @@ async def main() -> None:
     background_tasks = [
         asyncio.create_task(_suspicious_resume_watcher()),
         asyncio.create_task(_admin_redispatch_watcher()),
+        asyncio.create_task(_force_release_watcher()),
         asyncio.create_task(
             daily_backup_loop(
                 settings.database_url,
                 settings.backup_dir,
                 settings.backup_interval_seconds,
                 settings.backup_retention,
+                alert_sink=notifier.send,
             )
         ),
     ]
@@ -199,6 +264,7 @@ async def main() -> None:
     finally:
         for task in background_tasks:
             task.cancel()
+        await notifier.close()  # Audit N-3
 
 
 if __name__ == "__main__":

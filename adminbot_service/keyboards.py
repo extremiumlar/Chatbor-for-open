@@ -17,7 +17,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from core.enums import CaseStatus
+from core.enums import CaseStatus, MANUAL_RESOLVABLE_STATUSES
 from core.logic.bot_pool import PHONE_FORMATS
 
 # --------------------------------------------------------------------------- #
@@ -175,12 +175,29 @@ def template_card(kind: str, key: str) -> InlineKeyboardMarkup:
 PAGE_SIZE = 8
 
 
-def case_list(cases, kind: str, page: int, total: int) -> InlineKeyboardMarkup:
-    """kind: 'pr' = muammolar, 'pn' = navbat."""
+def case_list(cases, kind: str, page: int, total: int, extra: str = "") -> InlineKeyboardMarkup:
+    """kind: 'pr' = muammolar, 'pn' = navbat, 'sr' = qidiruv natijalari.
+
+    Audit J-6 — `extra` (masalan qidiruv nomeri) berilsa, sahifalash
+    tugmalari `pg:{kind}:{extra}:{page}` shaklida bo'ladi — shu orqali
+    "sr" (qidiruv) sahifalash o'ziga xos filtrni (nomerni) saqlab qoladi,
+    "pr"/"pn" ro'yxatlari bilan aralashib ketmaydi.
+
+    Audit O-3 — har bir case tugmasi endi manba (`kind`/`page`/`extra`)ni
+    o'zi bilan olib yuradi (`cs:{id}:{kind}:{page}` yoki qidiruv uchun
+    `cs:{id}:sr:{extra}:{page}`), shuning uchun kartochkadagi "⬅️ Orqaga"
+    tugmasi HAQIQATAN qayerdan kelingan bo'lsa o'sha ro'yxat/sahifaga
+    qaytaradi — avval doim "Muammolar" ro'yxatiga qaytarardi.
+    """
+    if kind == "sr":
+        origin_suffix = f":{kind}:{extra}:{page}"
+    else:
+        origin_suffix = f":{kind}:{page}"
     rows = [
         [
             InlineKeyboardButton(
-                text=f"#{c.id} · {c.phone} · {c.status.value}", callback_data=f"cs:{c.id}"
+                text=f"#{c.id} · {c.phone} · {c.status.value}",
+                callback_data=f"cs:{c.id}{origin_suffix}",
             )
         ]
         for c in cases
@@ -188,14 +205,15 @@ def case_list(cases, kind: str, page: int, total: int) -> InlineKeyboardMarkup:
 
     last_page = max(0, (total - 1) // PAGE_SIZE)
     if last_page > 0:
+        prefix = f"pg:{kind}:{extra}:" if extra else f"pg:{kind}:"
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"pg:{kind}:{page - 1}"))
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}{page - 1}"))
         nav.append(
             InlineKeyboardButton(text=f"{page + 1}/{last_page + 1}", callback_data="noop")
         )
         if page < last_page:
-            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"pg:{kind}:{page + 1}"))
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{prefix}{page + 1}"))
         rows.append(nav)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -205,13 +223,11 @@ def case_card(case, user, back: str = "nav:problems") -> InlineKeyboardMarkup:
     rows = []
 
     # TZ 9.3 — "Noaniq natijada: [Tasdiqlash] [Rad] [Qayta uzatish]"
-    if case.status in (
-        CaseStatus.NEEDS_ADMIN,
-        CaseStatus.TIMEOUT,
-        CaseStatus.DUPLICATE_ACTIVE,
-        CaseStatus.EXPIRED,
-        CaseStatus.CUSTOMER_TIMEOUT,
-    ):
+    # Audit K-3 — shu ro'yxat core.logic.case_admin'dagi server-tomon
+    # tekshiruvi bilan BITTA manbadan (core.enums.MANUAL_RESOLVABLE_STATUSES)
+    # olinadi, aks holda tugma ko'rinishi va server ruxsati mos kelmay qolishi
+    # mumkin edi.
+    if case.status in MANUAL_RESOLVABLE_STATUSES:
         rows.append(
             [
                 InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"cs:{case.id}:ok"),
@@ -251,7 +267,10 @@ def case_card(case, user, back: str = "nav:problems") -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 
 
-def user_card(user) -> InlineKeyboardMarkup:
+def user_card(user, can_assign: bool = True, viewer_admin_id: int | None = None) -> InlineKeyboardMarkup:
+    """Audit K-4 (TZ 11.0/11.1, Q51) — `can_assign` (Owner/Rop) va
+    `viewer_admin_id` mijozni biriktirish/bekor qilish tugmalarini
+    boshqaradi."""
     rows = []
     if user.is_blocked:
         rows.append(
@@ -264,6 +283,22 @@ def user_card(user) -> InlineKeyboardMarkup:
         rows.append(
             [InlineKeyboardButton(text="✅ Xavfsiz deb belgilash", callback_data=f"usr:{user.id}:safe")]
         )
+
+    if user.assigned_admin_id is None:
+        rows.append(
+            [InlineKeyboardButton(text="🎯 Menga biriktirish", callback_data=f"usr:{user.id}:claim")]
+        )
+    else:
+        if user.assigned_admin_id == viewer_admin_id:
+            rows.append([InlineKeyboardButton(text="✅ Sizga biriktirilgan", callback_data="noop")])
+        if can_assign:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="♻️ Biriktirishni bekor qilish", callback_data=f"usr:{user.id}:unassign"
+                    )
+                ]
+            )
 
     rows.append([InlineKeyboardButton(text="📝 Izoh yozish", callback_data=f"usr:{user.id}:note")])
     rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="nav:problems")])
@@ -280,8 +315,29 @@ def settings_menu(verbose: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"🔔 Bildirishnoma: {mode}", callback_data="nav:notify")],
+            # Audit J-9 (TZ 2.2, 4.1) — avval bular faqat .env orqali sozlanardi.
+            [InlineKeyboardButton(text="📱 Operator kodlari", callback_data="nav:opcodes")],
+            [InlineKeyboardButton(text="⏱ Kupon kutish vaqti", callback_data="nav:timeout")],
             [InlineKeyboardButton(text="📋 Audit (admin harakatlari)", callback_data="nav:audit")],
             [InlineKeyboardButton(text="🔧 Tizim holati", callback_data="nav:health")],
+        ]
+    )
+
+
+def opcodes_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ O'zgartirish", callback_data="opcodes:edit")],
+            [InlineKeyboardButton(text="⬅️ Sozlamalar", callback_data="nav:settings")],
+        ]
+    )
+
+
+def timeout_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ O'zgartirish", callback_data="timeout:edit")],
+            [InlineKeyboardButton(text="⬅️ Sozlamalar", callback_data="nav:settings")],
         ]
     )
 

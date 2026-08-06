@@ -12,10 +12,8 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.enums import CaseStatus
+from core.enums import PROBLEM_STATUSES, CaseStatus
 from core.models import Case
-
-PROBLEM_STATUSES = (CaseStatus.DUPLICATE_ACTIVE, CaseStatus.NEEDS_ADMIN, CaseStatus.SUSPICIOUS_HOLD)
 
 
 @dataclass

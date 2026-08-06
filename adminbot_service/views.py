@@ -168,6 +168,9 @@ def case_card(case, user, attempts) -> str:
 
 def user_card(user, cases) -> str:
     uname = f"@{user.tg_username}" if user.tg_username else "—"
+    biriktirilgan = (
+        f"admin #{user.assigned_admin_id}" if user.assigned_admin_id is not None else "hech kimga (ochiq)"
+    )
     lines = [
         f"👤 <b>{user.display_name or 'Mijoz'}</b>  (#{user.id})",
         "",
@@ -175,6 +178,7 @@ def user_card(user, cases) -> str:
         f"Telegram ID: <code>{user.tg_user_id}</code>",
         f"Oxirgi nomer: <code>{user.phone or '—'}</code>",
         f"Holat: {'🚫 bloklangan' if user.is_blocked else ('🕵️ shubhali' if not user.is_safe else '✅ xavfsiz')}",
+        f"Biriktirilgan: {biriktirilgan}",  # TZ 11.0/11.1, Q51 — audit K-4
         f"Birinchi ko'rilgan: {user.first_seen}",
         f"Oxirgi ko'rilgan: {user.last_seen}",
         f"📝 Izoh: {user.note or '—'}",

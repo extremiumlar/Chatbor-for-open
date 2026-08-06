@@ -5,8 +5,18 @@ jadvallari MVP-2 da qo'shiladi (TZ 15-bo'lim bosqichlariga rioya qilinmoqda).
 """
 
 import datetime
+import enum
 
-from sqlalchemy import DateTime, Enum as SqlEnum, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    DateTime,
+    Enum as SqlEnum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from core.enums import CaseStatus
@@ -22,18 +32,34 @@ class Base(DeclarativeBase):
     pass
 
 
-class Admin(Base):
-    """MVP-1 da minimal: Teleton qaysi shaxsiy akkaunt ostida ishlayotgani.
+class AdminRole(str, enum.Enum):
+    """TZ 14-bo'lim — rollar. Audit K-4/J-8: avval bu tizim umuman yo'q edi,
+    har bir `admins` qatoridagi odam cheklovsiz to'liq huquqqa ega edi."""
 
-    To'liq rol tizimi (owner/rop/dasturchi/admin/kuzatuvchi, TZ 14-bo'lim)
-    Adminbot bilan birga MVP-2 da kengaytiriladi.
-    """
+    OWNER = "OWNER"
+    ROP = "ROP"
+    DASTURCHI = "DASTURCHI"
+    ADMIN = "ADMIN"
+    KUZATUVCHI = "KUZATUVCHI"
+
+
+# TZ 11.0 (Q51 — TASDIQLANGAN): faqat shu ikki rol boshqa adminlarning
+# mijozlari/case'larini ham ko'ra oladi — qolganlari faqat o'ziga
+# biriktirilganini (yoki hali hech kimga biriktirilmaganini) ko'radi.
+UNRESTRICTED_ROLES = frozenset({AdminRole.OWNER, AdminRole.ROP})
+
+
+class Admin(Base):
+    """Adminbot/Panelga kira oladigan xodim — TZ 12.2, 14-bo'lim (rol)."""
 
     __tablename__ = "admins"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_user_id: Mapped[int] = mapped_column(Integer, unique=True)
     name: Mapped[str] = mapped_column(String(255))
+    role: Mapped[AdminRole] = mapped_column(
+        SqlEnum(AdminRole, native_enum=False, length=16), default=AdminRole.ADMIN
+    )
 
 
 class User(Base):
@@ -87,6 +113,14 @@ class Bot(Base):
     # mumkin; /addbot orqali admin belgilaydi, real_bot_adapter shunga qarab
     # birinchi ishlatishda /start yuboradi.
     needs_start_greeting: Mapped[bool] = mapped_column(default=False)
+
+    # Audit J-4 — Adminbot va Teleton alohida jarayon (TZ 13.1); Adminbotning
+    # "Majburan bo'shatish" tugmasi haqiqiy (jarayon-ichidagi) navbat
+    # mexanizmiga to'g'ridan-to'g'ri tegina olmaydi. `admin_redispatch_requested`
+    # bilan bir xil naqsh: Adminbot faqat shu bayroqni qo'yadi, Teleton'ning
+    # fon kuzatuvchisi ko'rib HAQIQIY `BotPoolManager.force_release`ni
+    # chaqiradi va bayroqni tozalaydi.
+    force_release_requested: Mapped[bool] = mapped_column(default=False)
 
 
 class Case(Base):
@@ -174,6 +208,68 @@ class BotPattern(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(String(500))
+
+
+class RelayDirection(str, enum.Enum):
+    TO_BOT = "TO_BOT"
+    FROM_BOT = "FROM_BOT"
+
+
+class RelayLog(Base):
+    """Har bir tekshiruv-bot bilan almashinuv izi — TZ 11.5 ("relay_log —
+    har bir uzatish izi"). Audit J-7 — bu jadval TZ'da aniq talab qilingan
+    edi, lekin kodda umuman mavjud emas edi. `coupon_attempts`dan farqli
+    (u faqat YAKUNIY natijani saqlaydi), bu HAR bir yo'nalishdagi xabar
+    almashinuvni (nomer/kupon yuborilganda va bot javob berganda) qayd
+    etadi — natija qanday bo'lishidan qat'i nazar (masalan bot javob
+    bermay TIMEOUT bo'lsa ham, yuborilgan so'rov shu yerda qoladi)."""
+
+    __tablename__ = "relay_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True)
+    bot_id: Mapped[int | None] = mapped_column(ForeignKey("bots.id"), nullable=True)
+    direction: Mapped[RelayDirection] = mapped_column(
+        SqlEnum(RelayDirection, native_enum=False, length=16)
+    )
+    payload: Mapped[str] = mapped_column(String(2000))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class OpenBudgetVote(Base):
+    """openbudget.uz "Овозларни кўриш" ro'yxatidan olingan bitta ovoz.
+
+    Sayt telefon nomerini MASKALAB beradi (faqat oxirgi 4 raqam ko'rinadi),
+    shuning uchun kupon egasini aniqlash ham faqat shu 4 raqam + ovoz vaqti
+    bo'yicha mumkin — bu ATOMAR EMAS (bir xil 4 raqamli turli nomerlar
+    bo'lishi tabiiy), moslik "dalil" emas, "ishora" sifatida ishlatilishi kerak.
+
+    `raw` — API javobining o'zgarishsiz nusxasi: sayt maydon nomlarini
+    o'zgartirsa, eski yozuvlarni qayta talqin qilish imkoni qoladi.
+    """
+
+    __tablename__ = "openbudget_votes"
+    __table_args__ = (
+        # Sayt ovozlarga barqaror ID bermaydi — takrorlanmaslik uchun
+        # yagona ishonchli kalit "qaysi tashabbus + maskalangan nomer +
+        # ovoz vaqti" uchligi. Shu bilan sinxronizatsiya idempotent bo'ladi
+        # (bir xil sahifani qayta o'qish dublikat yaratmaydi).
+        UniqueConstraint(
+            "initiative_id", "phone_masked", "voted_at_raw", name="uq_openbudget_vote"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    initiative_id: Mapped[str] = mapped_column(String(64), index=True)
+    # API qaytargan ko'rinish, masalan "**** **** **12 34" — o'zgarishsiz.
+    phone_masked: Mapped[str] = mapped_column(String(64))
+    # Undan ajratib olingan oxirgi 4 raqam — qidiruv aynan shu ustun bo'yicha.
+    phone_suffix: Mapped[str] = mapped_column(String(4), index=True)
+    voted_at_raw: Mapped[str] = mapped_column(String(64))
+    # Parse qilib bo'lmasa None — xom qiymat baribir saqlanadi.
+    voted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    raw: Mapped[str] = mapped_column(Text, default="")
+    fetched_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class AuditLog(Base):

@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import datetime
+from typing import Awaitable, Callable
 
 from core.db import sqlite_file_path
 
@@ -53,13 +54,22 @@ async def backup_once(database_url: str, backup_dir: str, retention: int = 14) -
 
 
 async def daily_backup_loop(
-    database_url: str, backup_dir: str, interval_seconds: float, retention: int = 14
+    database_url: str,
+    backup_dir: str,
+    interval_seconds: float,
+    retention: int = 14,
+    alert_sink: Callable[[str, bool], Awaitable[None]] | None = None,
 ) -> None:
+    """Audit J-5 — `alert_sink` ixtiyoriy (`None` — chaqiruvchi bermasa,
+    avvalgidek faqat log yoziladi): berilsa, TZ 12.1 (Q42) talab qilganidek
+    kritik xato adminbotga ham darhol push qilinadi, faqat faylga emas."""
     while True:
         try:
             dest = await backup_once(database_url, backup_dir, retention)
             if dest is not None:
                 log.info("Kunlik backup yaratildi: %s", dest)
-        except Exception:
+        except Exception as exc:
             log.exception("Backup yaratishda xato")
+            if alert_sink is not None:
+                await alert_sink(f"KRITIK: kunlik backup yaratishda xato: {exc!r}", True)
         await asyncio.sleep(interval_seconds)

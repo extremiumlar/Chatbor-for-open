@@ -64,6 +64,15 @@ class AdminNotifier:
         )
         await self._broadcast(message, markup)
 
+    async def close(self) -> None:
+        """Audit N-3 — Teleton jarayoni o'zining `aiogram.Bot` nusxasini
+        (Adminbot jarayonidagi asosiy Bot'dan ALOHIDA, chunki ikkovi
+        turli OS jarayoni — bitta Python obyektini ikki jarayon o'rtasida
+        baham ko'rib bo'lmaydi) ochadi; to'xtaganda uning HTTP-sessiyasini
+        tozalab yopish kerak."""
+        if self._bot is not None:
+            await self._bot.session.close()
+
     async def _broadcast(self, message: str, markup: InlineKeyboardMarkup | None = None) -> None:
         async with self.session_factory() as session:
             admin_ids = await list_admin_tg_ids(session)

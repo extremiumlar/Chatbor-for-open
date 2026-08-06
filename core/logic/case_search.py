@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import CaseStatus
-from core.models import Case
+from core.models import Case, User
 
 
 async def search_cases(
@@ -19,8 +19,10 @@ async def search_cases(
     date_from: datetime.date | None = None,
     date_to: datetime.date | None = None,
     limit: int = 200,
+    viewer_admin_id: int | None = None,
+    can_see_all: bool = True,
 ) -> list[Case]:
-    stmt = select(Case).order_by(Case.id.desc()).limit(limit)
+    stmt = select(Case)
 
     if phone:
         stmt = stmt.where(Case.phone.contains(phone))
@@ -32,6 +34,14 @@ async def search_cases(
         )
     if date_to is not None:
         stmt = stmt.where(Case.created_at <= datetime.datetime.combine(date_to, datetime.time.max))
+    if not can_see_all:
+        # Audit K-4 (TZ 11.0, Q51) — oddiy admin faqat o'ziga biriktirilgan
+        # yoki hali hech kimga biriktirilmagan mijozlarning case'larini
+        # qidirishi mumkin.
+        stmt = stmt.join(User, Case.user_id == User.id).where(
+            (User.assigned_admin_id.is_(None)) | (User.assigned_admin_id == viewer_admin_id)
+        )
 
+    stmt = stmt.order_by(Case.id.desc()).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())

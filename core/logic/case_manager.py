@@ -23,12 +23,14 @@ from typing import Awaitable, Callable, Protocol, TypeVar
 from sqlalchemy import select
 
 from core.config import settings
-from core.enums import ACTIVE_STATUSES, CaseStatus
+from core.enums import ACTIVE_STATUSES, HELD_STATUSES, CaseStatus
 from core.logic.bot_pool import BotPoolManager
 from core.logic.bot_patterns import UnrecognizedBotResponseError
 from core.logic.phone import format_for_bot
+from core.logic.relay_log import log_relay
+from core.logic.settings_store import get_customer_timeout_seconds
 from core.logic.templates import get_template
-from core.models import Bot, Case, CouponAttempt, User
+from core.models import Bot, Case, CouponAttempt, RelayDirection, User
 
 log = logging.getLogger("case_manager")
 
@@ -86,11 +88,13 @@ class CaseManager:
         self.bot_client = bot_client
         self.alert_sink = alert_sink
         self.notify_customer = notify_customer or (lambda tg_user_id, text: _noop())
-        self.customer_timeout_seconds = (
-            customer_timeout_seconds
-            if customer_timeout_seconds is not None
-            else settings.customer_coupon_timeout_seconds
-        )
+        # Audit J-9 (TZ 2.2) — "5 daqiqa — adminbot orqali sozlanadigan
+        # qiymat." Agar chaqiruvchi ANIQ qiymat bergan bo'lsa (masalan
+        # testlarda), o'sha qat'iy ishlatiladi. Aks holda (`None`) har safar
+        # timer boshlanganda joriy qiymat BAZADAN o'qiladi (`_resolve_
+        # customer_timeout_seconds`) — shu orqali Adminbot orqali
+        # o'zgartirilgan qiymat qayta ishga tushirmasdan darhol ta'sir qiladi.
+        self.customer_timeout_seconds = customer_timeout_seconds
         self.suspicious_alert_sink = suspicious_alert_sink
         self.image_warning_sink = image_warning_sink
         self.bot_response_max_retries = (
@@ -137,15 +141,32 @@ class CaseManager:
                 # aniq javob bermagan joy, DUPLICATE_ACTIVE'ga o'xshatib ishlov berildi).
                 return await self._hold_as_duplicate_active(session, user, phone, latest_case)
 
-            if latest_case is not None and latest_case.status in (
-                CaseStatus.NEEDS_ADMIN,
-                CaseStatus.SUSPICIOUS_HOLD,
-            ):
-                # Admin aralashuvi kutilayotgan case — avtomatik qayta urinish yo'q.
+            if latest_case is not None and latest_case.status == CaseStatus.CUSTOMER_TIMEOUT:
+                if latest_case.phone == phone:
+                    # TZ 2.2 — mijoz timeoutdan keyin AYNAN O'SHA nomerni qaytadan
+                    # yuborsa "jarayon boshidan boshlanadi" (yangi bot olinadi,
+                    # lekin case_id o'zgarmaydi — EXPIRED-bir-xil-nomer bilan bir xil).
+                    return await self._dispatch_to_bot(session, latest_case)
                 return await self._hold_as_duplicate_active(session, user, phone, latest_case)
 
-            if await self._find_confirmed_case_by_phone(session, phone) is not None:
-                # TZ 2.4 (Q50) — tasdiqlangan nomer botga yuborilmaydi.
+            if latest_case is not None and latest_case.status in HELD_STATUSES:
+                # Audit K-1 — bu tekshiruv oldin faqat (NEEDS_ADMIN, SUSPICIOUS_HOLD)
+                # edi; TIMEOUT va DUPLICATE_ACTIVE ham shu yerga kiritilishi shart,
+                # aks holda ular bo'yicha kelgan uchinchi/keyingi xabar "yangi
+                # murojaat" deb pastga tushib, botga noto'g'ri dispatch bo'lardi.
+                return await self._hold_as_duplicate_active(session, user, phone, latest_case)
+
+            confirmed_case = await self._find_confirmed_case_by_phone(session, phone)
+            if confirmed_case is not None:
+                if confirmed_case.user_id != user.id:
+                    # Audit O-1 — BOSHQA akkaunt allaqachon tasdiqlangan
+                    # nomerni yuborishi oddiy "allaqachon tasdiqlangan"
+                    # javobidan ko'ra kuchliroq firibgarlik signali (TZ
+                    # 5.2 ruhida) — avval bu holat sezilmay, jim
+                    # "tasdiqlangan" deb javob berilardi, adminga hech
+                    # qanday alert bormasdi.
+                    return await self._hold_as_suspicious(session, user, phone, confirmed_case)
+                # TZ 2.4 (Q50) — o'zi (bir xil user) qayta yuborsa, botga yuborilmaydi.
                 text = await get_template(session, "ALREADY_CONFIRMED")
                 return RelayOutcome(customer_text=text)
 
@@ -194,11 +215,18 @@ class CaseManager:
             bot = await session.get(Bot, case.bot_id)
             await session.commit()
 
+            # Audit J-7 (TZ 11.5) — har bir uzatish (yo'nalishidan qat'i
+            # nazar) `relay_log`ga yoziladi, natijadan mustaqil.
+            await log_relay(session, RelayDirection.TO_BOT, coupon, case_id=case.id, bot_id=bot.id)
+
             try:
                 result_status, _bot_text = await self._call_bot(
                     lambda: self.bot_client.check_coupon(bot, coupon)
                 )
             except UnrecognizedBotResponseError as exc:
+                await log_relay(
+                    session, RelayDirection.FROM_BOT, str(exc), case_id=case.id, bot_id=bot.id
+                )
                 await self._handle_unrecognized_response(
                     session, case, case.bot_id, tg_user_id, str(exc)
                 )
@@ -206,6 +234,10 @@ class CaseManager:
             except Exception:
                 await self._handle_bot_timeout(session, case, case.bot_id, tg_user_id)
                 return RelayOutcome(customer_text=None)
+
+            await log_relay(
+                session, RelayDirection.FROM_BOT, _bot_text, case_id=case.id, bot_id=bot.id
+            )
 
             session.add(
                 CouponAttempt(
@@ -301,12 +333,41 @@ class CaseManager:
         return RelayOutcome(customer_text=text)
 
     async def _send_coupon_request(self, session, case: Case, bot: Bot) -> str | None:
-        phone_for_bot = format_for_bot(case.phone, bot.phone_format)
+        # Audit K-2 — format_for_bot endi try/except ICHIDA: `add_bot`/
+        # `set_bot_phone_format` yangi qo'shilgan bot tayinlashda formatni
+        # tekshirsa ham, bazadagi ESKI (fix'dan oldingi) noto'g'ri format
+        # hamon uchrashi mumkin — bu mudofaa qatlami bot abadiy "band" bo'lib
+        # qolishining (lane leak) oldini oladi.
         try:
-            await self._call_bot(lambda: self.bot_client.request_coupon(bot, phone_for_bot))
+            phone_for_bot = format_for_bot(case.phone, bot.phone_format)
+        except ValueError as exc:
+            await self._handle_bad_bot_config(session, case, bot.id, case.user_id, str(exc))
+            return None
+
+        # Audit J-7 (TZ 11.5) — har bir uzatish `relay_log`ga yoziladi.
+        await log_relay(
+            session, RelayDirection.TO_BOT, phone_for_bot, case_id=case.id, bot_id=bot.id
+        )
+
+        try:
+            bot_reply = await self._call_bot(
+                lambda: self.bot_client.request_coupon(bot, phone_for_bot)
+            )
+        except UnrecognizedBotResponseError as exc:
+            # Audit J-10 — real bot rejimida nomerga kutilmagan javob bersa
+            # (COUPON_REQUEST shabloniga mos kelmasa), bu ham TZ 8-bo'limdagi
+            # "bot javob berdi, faqat tushunarsiz" holati — TIMEOUT emas,
+            # to'g'ridan-to'g'ri NEEDS_ADMIN.
+            await log_relay(
+                session, RelayDirection.FROM_BOT, str(exc), case_id=case.id, bot_id=bot.id
+            )
+            await self._handle_unrecognized_response(session, case, bot.id, case.user_id, str(exc))
+            return None
         except Exception:
             await self._handle_bot_timeout(session, case, bot.id, case.user_id)
             return None
+
+        await log_relay(session, RelayDirection.FROM_BOT, bot_reply, case_id=case.id, bot_id=bot.id)
 
         case.status = CaseStatus.AWAITING_COUPON
         await session.commit()
@@ -359,6 +420,24 @@ class CaseManager:
         await self._alert(
             f"Tekshiruv bot javob bermadi ({self.bot_response_max_retries} urinishdan keyin). "
             f"Case #{case.id} TIMEOUT (tg_id={tg_user_id}).",
+            important=True,
+        )
+
+    async def _handle_bad_bot_config(
+        self, session, case: Case, bot_id: int, tg_user_id: int, reason: str
+    ) -> None:
+        # Audit K-2 — bot noto'g'ri phone_format bilan sozlangan bo'lsa, bu
+        # botning javob bermasligidan farqli: muammo bizning sozlamamizda,
+        # qayta urinish (retry/backoff) foydasiz. Case NEEDS_ADMIN'ga
+        # o'tadi (qayta ishlov berish uchun tayyor holatda qoladi), bot
+        # majburan bo'shatiladi (TZ 12 — lane leak oldini olish), admin
+        # darhol xabardor qilinadi.
+        case.status = CaseStatus.NEEDS_ADMIN
+        await session.commit()
+        await self.pool.force_release(session, bot_id)
+        await self._alert(
+            f"Bot sozlamasi noto'g'ri (nomer formati): {reason}. "
+            f"Case #{case.id} NEEDS_ADMIN (tg_id={tg_user_id}).",
             important=True,
         )
 
@@ -429,9 +508,16 @@ class CaseManager:
         if task is not None:
             task.cancel()
 
+    async def _resolve_customer_timeout_seconds(self) -> float:
+        if self.customer_timeout_seconds is not None:
+            return self.customer_timeout_seconds
+        async with self.session_factory() as session:
+            return await get_customer_timeout_seconds(session)
+
     async def _customer_timeout_watch(self, case_id: int) -> None:
         try:
-            await asyncio.sleep(self.customer_timeout_seconds)
+            timeout_seconds = await self._resolve_customer_timeout_seconds()
+            await asyncio.sleep(timeout_seconds)
         except asyncio.CancelledError:
             return
 
@@ -509,12 +595,34 @@ class CaseManager:
         )
         return result.scalars().first() is not None
 
+    # Audit K-1 — bu holatlarda case allaqachon o'zining aniq, alohida hal
+    # qilish yo'liga ega (NEEDS_ADMIN/TIMEOUT: generic Tasdiqlash/Rad/Qayta
+    # uzatish; SUSPICIOUS_HOLD: Xavfsiz/Bloklash + _suspicious_resume_watcher
+    # aynan shu statusni kutadi). Takroriy nomer kelganda statusni
+    # DUPLICATE_ACTIVE bilan ustidan yozib yuborish bu maxsus oqimlarni
+    # (masalan Xavfsiz bosilganda avtomatik davom etish) buzib qo'yardi —
+    # shuning uchun bu uchtasida FAQAT qayta ogohlantirilamiz, status
+    # tegilmaydi. Boshqa barcha holatlarda (oddiy faol jarayon, EXPIRED,
+    # CUSTOMER_TIMEOUT, yoki case allaqachon DUPLICATE_ACTIVE) status
+    # DUPLICATE_ACTIVE'ga o'tkaziladi — bu holatlarning bari allaqachon bir
+    # xil generic tugmalar to'plamiga ega, hech narsa yo'qotilmaydi.
+    _STATUS_PRESERVING_HOLD = frozenset(
+        {CaseStatus.NEEDS_ADMIN, CaseStatus.SUSPICIOUS_HOLD, CaseStatus.TIMEOUT}
+    )
+
     async def _hold_as_duplicate_active(
         self, session, user: User, phone: str, existing_case: Case
     ) -> RelayOutcome:
-        duplicate = Case(user_id=user.id, phone=phone, status=CaseStatus.DUPLICATE_ACTIVE)
-        session.add(duplicate)
-        await session.commit()
+        # Audit K-1/O-5 — YANGI, bo'sh Case ochish o'rniga MAVJUD (band/hal
+        # bo'lmagan) case joyida ushlab qolinadi. Bu ikki narsani birdan hal
+        # qiladi: (1) keyingi xabar kelganda "eng so'nggi case" hamon aynan
+        # shu, haqiqiy kontekstli case bo'lib qoladi (niqoblanish yo'q), (2)
+        # admin "Muammolar"da ko'radigan kartochka bo'sh emas, botga
+        # yuborilgan haqiqiy nomer/kupon tarixini o'zida saqlaydi.
+        if existing_case.status not in self._STATUS_PRESERVING_HOLD:
+            existing_case.status = CaseStatus.DUPLICATE_ACTIVE
+            await session.commit()
+
         text = await get_template(session, "DUPLICATE_ACTIVE")
         await self._alert(
             f"Mijoz (tg_id={user.tg_user_id}) ikkinchi nomer yubordi ({phone}), "

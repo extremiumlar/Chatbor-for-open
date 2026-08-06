@@ -2,11 +2,28 @@
 bot pool boshqaruvi (`/addbot`/`/bots`), va case_manager'ning dinamik
 shablon + severity integratsiyasi."""
 
+import pytest
+
 from core import texts
 from core.enums import CaseStatus
-from core.logic.admins import ensure_admins_seeded, is_admin, list_admin_tg_ids
+from core.logic.admins import (
+    ensure_admins_seeded,
+    get_admin_by_tg_id,
+    is_admin,
+    list_admin_tg_ids,
+    list_admins,
+    set_admin_role,
+)
 from core.logic.bot_pool import add_bot, list_bots
-from core.logic.settings_store import is_verbose, set_verbose
+from core.models import AdminRole
+from core.logic.settings_store import (
+    get_customer_timeout_seconds,
+    get_operator_codes,
+    is_verbose,
+    set_customer_timeout_seconds,
+    set_operator_codes,
+    set_verbose,
+)
 from core.logic.templates import (
     DEFAULTS,
     ensure_templates_seeded,
@@ -36,6 +53,55 @@ async def test_admin_seeding_and_lookup_is_idempotent(session_factory):
 
 
 # --------------------------------------------------------------------------- #
+# Audit K-4/J-8 (TZ 14-bo'lim) — rol tizimi
+# --------------------------------------------------------------------------- #
+
+
+async def test_first_seeded_admin_becomes_owner_rest_are_plain_admin(session_factory):
+    """Bazada hali birorta ham admin yo'q holatda seed qilinganda, ro'yxatdagi
+    BIRINCHI tg_id OWNER bo'ladi — tizimda kamida bitta cheklovsiz admin
+    bo'lishi kafolatlanadi (aks holda Q51 ko'rish-cheklovi hech kimga
+    to'liq ko'rinish qoldirmasdi)."""
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111, 222, 333])
+
+        first = await get_admin_by_tg_id(session, 111)
+        second = await get_admin_by_tg_id(session, 222)
+        third = await get_admin_by_tg_id(session, 333)
+
+        assert first.role == AdminRole.OWNER
+        assert second.role == AdminRole.ADMIN
+        assert third.role == AdminRole.ADMIN
+
+
+async def test_seeding_again_does_not_create_second_owner(session_factory):
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111])
+        await ensure_admins_seeded(session, [111, 222])  # 111 allaqachon bor, 222 yangi
+
+        second = await get_admin_by_tg_id(session, 222)
+        assert second.role == AdminRole.ADMIN  # OWNER emas
+
+
+async def test_set_admin_role_updates_and_returns_none_for_missing(session_factory):
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111])
+        admin = await get_admin_by_tg_id(session, 111)
+
+        updated = await set_admin_role(session, admin.id, AdminRole.ROP)
+        assert updated.role == AdminRole.ROP
+
+        assert await set_admin_role(session, 9999, AdminRole.ROP) is None
+
+
+async def test_list_admins_returns_all(session_factory):
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111, 222])
+        admins = await list_admins(session)
+        assert {a.tg_user_id for a in admins} == {111, 222}
+
+
+# --------------------------------------------------------------------------- #
 # Notify verbose sozlamasi (TZ 9.1)
 # --------------------------------------------------------------------------- #
 
@@ -49,6 +115,36 @@ async def test_notify_verbose_defaults_to_off_and_is_toggleable(session_factory)
 
         await set_verbose(session, False)
         assert await is_verbose(session) is False
+
+
+# --------------------------------------------------------------------------- #
+# Audit J-9 (TZ 2.2, 4.1) — operator kodlari va mijoz-timeout Adminbot
+# orqali jonli sozlanadi, .env faqat boshlang'ich qiymat.
+# --------------------------------------------------------------------------- #
+
+
+async def test_operator_codes_default_from_env_and_are_settable(session_factory):
+    async with session_factory() as session:
+        default = await get_operator_codes(session)
+        assert "90" in default and "97" in default  # .env'dagi standart ro'yxat
+
+        await set_operator_codes(session, ["90", "91", "77"])
+        updated = await get_operator_codes(session)
+        assert updated == ["90", "91", "77"]
+
+
+async def test_customer_timeout_seconds_default_from_env_and_are_settable(session_factory):
+    async with session_factory() as session:
+        default = await get_customer_timeout_seconds(session)
+        assert default == 300.0  # .env/config standart qiymati
+
+        await set_customer_timeout_seconds(session, 120)
+        assert await get_customer_timeout_seconds(session) == 120.0
+
+        with pytest.raises(ValueError):
+            await set_customer_timeout_seconds(session, 0)
+        with pytest.raises(ValueError):
+            await set_customer_timeout_seconds(session, -5)
 
 
 # --------------------------------------------------------------------------- #

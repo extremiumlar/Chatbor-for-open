@@ -14,7 +14,7 @@ _CANDIDATE_RE = re.compile(r"\+?[\d][\d\s\-()]{7,16}\d")
 _NON_DIGIT_RE = re.compile(r"[^\d]")
 
 
-def _normalize_candidate(raw: str) -> str | None:
+def _normalize_candidate(raw: str, operator_codes: list[str]) -> str | None:
     """Probel/chiziqcha/qavslarni olib tashlab, faqat raqamlarni qoldiradi."""
     digits = _NON_DIGIT_RE.sub("", raw)
 
@@ -26,19 +26,25 @@ def _normalize_candidate(raw: str) -> str | None:
         return None
 
     operator_code = national[:2]
-    if operator_code not in settings.uz_operator_codes:
+    if operator_code not in operator_codes:
         return None
 
     return "998" + national
 
 
-def extract_phone(text: str) -> str | None:
+def extract_phone(text: str, operator_codes: list[str] | None = None) -> str | None:
     """Matn ichidan haqiqiy O'zbekiston nomerini topib, kanonik shaklda qaytaradi.
 
     Kanonik shakl: "998XXXXXXXXX" (12 raqam, "+"siz). Topilmasa None.
+
+    Audit J-9 (TZ 4.1) — `operator_codes` endi ixtiyoriy parametr (odatiy
+    holatda `.env`dagi statik ro'yxat ishlatiladi, sof funksiya sinovlari
+    uchun mos) — Teleton esa jonli, Adminbot orqali sozlanadigan ro'yxatni
+    (`core.logic.settings_store.get_operator_codes`) shu yerga uzatadi.
     """
+    codes = operator_codes if operator_codes is not None else settings.uz_operator_codes
     for match in _CANDIDATE_RE.finditer(text):
-        normalized = _normalize_candidate(match.group())
+        normalized = _normalize_candidate(match.group(), codes)
         if normalized is not None:
             return normalized
     return None

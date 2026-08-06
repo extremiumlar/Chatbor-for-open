@@ -12,10 +12,12 @@ import hmac
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from core.enums import CaseStatus
 from core.logic.case_search import search_cases
 from core.logic.customers import case_count_for_user, cases_for_user, list_customers
+from core.models import Admin, AdminRole
 from panel_service.auth import verify_telegram_auth
 
 BOT_TOKEN = "123456:test-bot-token"
@@ -124,6 +126,39 @@ async def test_list_customers_search_and_history(seed_bots, make_case_manager, s
         assert await case_count_for_user(session, user.id) == 1
 
 
+async def test_list_customers_and_search_cases_scoped_by_assigned_admin(
+    seed_bots, make_case_manager, session_factory
+):
+    """Audit K-4 (TZ 11.0, Q51) — oddiy admin panel qidiruvida ham faqat
+    o'ziga biriktirilgan (yoki hali biriktirilmagan) mijoz/case'larni
+    ko'rishi kerak."""
+    from core.logic.case_admin import assign_customer
+    from core.models import User
+
+    await seed_bots(["bot1", "bot2"])
+    cm = make_case_manager()
+    await cm.handle_phone_detected(710, "mine", "Mine", "998907000001")
+    await cm.handle_phone_detected(711, "theirs", "Theirs", "998907000002")
+
+    async with session_factory() as session:
+        mine_user = (await session.execute(select(User).where(User.tg_user_id == 710))).scalars().first()
+        theirs_user = (
+            await session.execute(select(User).where(User.tg_user_id == 711))
+        ).scalars().first()
+        await assign_customer(session, mine_user.id, 50)
+        await assign_customer(session, theirs_user.id, 60)
+
+        visible_customers = await list_customers(session, viewer_admin_id=50, can_see_all=False)
+        assert {u.tg_username for u in visible_customers} == {"mine"}
+
+        visible_cases = await search_cases(session, viewer_admin_id=50, can_see_all=False)
+        assert {c.phone for c in visible_cases} == {"998907000001"}
+
+        # Owner/Rop (can_see_all=True) — hammasini ko'radi.
+        assert len(await list_customers(session, can_see_all=True)) == 2
+        assert len(await search_cases(session, can_see_all=True)) == 2
+
+
 # --------------------------------------------------------------------------- #
 # FastAPI route'lari — izolyatsiyalangan test bazasi bilan
 # --------------------------------------------------------------------------- #
@@ -138,7 +173,15 @@ def panel_client(seed_bots, make_case_manager, session_factory):
             yield session
 
     app.dependency_overrides[get_db] = _override_get_db
-    app.dependency_overrides[require_admin] = lambda: 777
+    # Audit K-4 — require_admin endi `Admin` qatorining o'zini qaytaradi
+    # (bool/int emas), rol-asoslangan ko'rish-cheklash uchun. Testda
+    # cheklovsiz (OWNER) admin sifatida kirilyapti — mavjud
+    # cases/customers hech kimga biriktirilmagan bo'lgani uchun bu
+    # rolidan qat'i nazar ham ko'rinardi, lekin haqiqiy interfeysga mos
+    # bo'lishi uchun to'liq Admin obyekti beriladi.
+    app.dependency_overrides[require_admin] = lambda: Admin(
+        id=777, tg_user_id=777, name="test-owner", role=AdminRole.OWNER
+    )
 
     client = TestClient(app, follow_redirects=False)
     yield client
@@ -165,6 +208,81 @@ async def test_authenticated_routes_return_200(panel_client, seed_bots, make_cas
     for path in ("/", "/audit", "/cases", f"/cases/{case_id}", "/customers", f"/customers/{user_id}"):
         response = panel_client.get(path)
         assert response.status_code == 200, path
+
+
+async def test_restricted_admin_panel_hides_other_admins_customer(
+    seed_bots, make_case_manager, session_factory
+):
+    """Audit K-4 (TZ 11.0, Q51) — oddiy (OWNER/ROP bo'lmagan) admin panel
+    orqali boshqa adminga biriktirilgan mijozni ko'ra olmasligi kerak."""
+    from panel_service.app import app, get_db, require_admin
+    from core.logic.case_admin import assign_customer
+    from core.models import User
+
+    await seed_bots(["bot1"])
+    cm = make_case_manager()
+    await cm.handle_phone_detected(802, "restricted_target", "Target", "998906666666")
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.tg_user_id == 802))
+        ).scalars().first()
+        await assign_customer(session, user.id, 999)  # boshqa adminga biriktirildi
+        user_id = user.id
+
+    async def _override_get_db():
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[require_admin] = lambda: Admin(
+        id=42, tg_user_id=42, name="plain-admin", role=AdminRole.ADMIN
+    )
+    client = TestClient(app, follow_redirects=False)
+    try:
+        assert client.get(f"/customers/{user_id}").status_code == 404
+        body = client.get("/customers").text
+        assert "restricted_target" not in body
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_removed_admin_session_is_rejected(session_factory):
+    """Audit O-4 (TZ 12.2) — avval `require_admin` faqat sessiya
+    (`tg_user_id`) borligini tekshirardi; admin `admins` jadvalidan olib
+    tashlansa ham eski sessiya orqali panelga kirish davom etardi. Endi
+    `require_admin` har so'rovda `admins` jadvalini qayta tekshiradi."""
+    from panel_service.app import NotAuthenticated, require_admin
+    from core.logic.admins import ensure_admins_seeded, get_admin_by_tg_id
+
+    class _FakeRequest:
+        def __init__(self, tg_user_id):
+            self.session = {"tg_user_id": tg_user_id}  # dict'ning .get()/.clear() yetarli
+
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [808])
+        admin = await get_admin_by_tg_id(session, 808)
+        assert admin is not None
+
+    async with session_factory() as session:
+        req = _FakeRequest(808)
+        # Hali admin ro'yxatda — sessiya qabul qilinadi.
+        result = await require_admin(req, db=session)
+        assert result.tg_user_id == 808
+
+    async with session_factory() as session:
+        admin = await get_admin_by_tg_id(session, 808)
+        await session.delete(admin)
+        await session.commit()
+
+    async with session_factory() as session:
+        req = _FakeRequest(808)  # sessiyada hamon "808" bor (eski)
+        try:
+            await require_admin(req, db=session)
+            assert False, "NotAuthenticated kutilgan edi"
+        except NotAuthenticated:
+            pass
+        assert "tg_user_id" not in req.session  # sessiya tozalangan
 
 
 def test_unauthenticated_request_redirects_to_login():

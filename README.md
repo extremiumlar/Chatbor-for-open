@@ -321,6 +321,46 @@ cp .env.example .env
   qaysi manzilda ishga tushishi. `PANEL_SESSION_SECRET` — sozlanmasa har
   ishga tushirishda tasodifiy (seanslar restart'da bekor bo'ladi).
 
+## Baza migratsiyasi (Alembic) — audit N-1
+
+Avval `alembic/` katalogi bor edi-yu, bo'sh edi — sxema o'zgarishlari
+qo'lda, kuzatilmagan `ALTER TABLE` orqali qilinardi. Endi ikkita
+migratsiya bor: `0001` (audit sessiyasigacha bo'lgan to'liq sxema) va
+`0002` (shu sessiyada qo'shilgan `admins.role`, `bots.force_release_requested`,
+`relay_log` jadvali).
+
+**Yangi (bo'sh) baza bilan ishga tushirayotgan bo'lsangiz:**
+
+```bash
+alembic upgrade head
+```
+
+**Mavjud, allaqachon ishlatilayotgan `data_relay.db` bilan** (masalan shu
+audit sessiyasigacha `init_db()` orqali qo'lda yaratilgan baza) — bazada
+`0001`dagi jadvallar ALLAQACHON bor, shuning uchun avval Alembic'ga "bu
+baza shu bosqichda" deb aytiladi (hech narsa BAJARILMAYDI, faqat
+belgilanadi), keyin faqat haqiqatan yetishmayotgan (`0002`) qism qo'llanadi:
+
+```bash
+alembic stamp 0001
+alembic upgrade head
+```
+
+> Bu ikki buyruq mavjud ma'lumotlarni o'chirmaydi/o'zgartirmaydi — faqat
+> yetishmayotgan `role` (standart `ADMIN`), `force_release_requested`
+> (standart yo'q/false) ustunlarini va bo'sh `relay_log` jadvalini
+> qo'shadi. Ishga tushirishdan oldin `backups/`ga (yoki qo'lda) nusxa olib
+> qo'yish tavsiya etiladi — SQLite fayllar bilan ishlaganda har doim
+> ehtiyot chorasi sifatida.
+
+Kelajakda `core/models.py`ga o'zgartirish kiritilganda:
+
+```bash
+alembic revision --autogenerate -m "tavsif"
+# generatsiya qilingan faylni tekshiring/tozalang, keyin:
+alembic upgrade head
+```
+
 Birinchi marta shaxsiy akkauntga ulanish uchun (agar `my_account.session`
 hali yo'q bo'lsa):
 

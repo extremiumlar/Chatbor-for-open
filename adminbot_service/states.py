@@ -25,3 +25,13 @@ class SearchFlow(StatesGroup):
 
 class UserNoteFlow(StatesGroup):
     waiting_note = State()
+
+
+# Audit J-9 (TZ 2.2, 4.1) — operator kodlari va mijoz-timeout endi
+# Adminbot orqali jonli sozlanadi.
+class EditOperatorCodesFlow(StatesGroup):
+    waiting_text = State()
+
+
+class EditTimeoutFlow(StatesGroup):
+    waiting_text = State()

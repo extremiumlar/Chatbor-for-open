@@ -197,6 +197,62 @@ async def test_real_bot_adapter_classifies_using_configured_patterns(session_fac
     assert await adapter._classify("Tushunarsiz boshqa xabar.") is None
 
 
+async def test_real_bot_adapter_request_coupon_raises_when_unrecognized(session_factory):
+    """Audit J-10 — avval request_coupon botning nomerga bergan javobini
+    HECH QANDAY tekshirmasdan qabul qilardi; endi COUPON_REQUEST shabloniga
+    solishtiriladi, mos kelmasa NEEDS_ADMIN'ga olib boruvchi xato ko'tariladi."""
+    async with session_factory() as session:
+        await set_pattern(session, "COUPON_REQUEST", "kupon raqamini")
+
+    class _FakeConversation:
+        def __init__(self, text):
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def send_message(self, text):
+            pass
+
+        async def get_response(self):
+            class _Msg:
+                pass
+
+            msg = _Msg()
+            msg.raw_text = self._text
+            return msg
+
+    class _FakeClient:
+        def __init__(self, text):
+            self._text = text
+
+        def conversation(self, username, timeout=None):
+            return _FakeConversation(self._text)
+
+    class _FakeBot:
+        id = 1
+        username = "fake_bot"
+        needs_start_greeting = False
+
+    ok_adapter = RealVerificationBotAdapter(
+        client=_FakeClient("Kupon raqamini yuboring."), session_factory=session_factory
+    )
+    result = await ok_adapter.request_coupon(_FakeBot(), "+998901234567")
+    assert result == "Kupon raqamini yuboring."
+
+    bad_adapter = RealVerificationBotAdapter(
+        client=_FakeClient("Xatolik: bunday xizmat yo'q."), session_factory=session_factory
+    )
+    try:
+        await bad_adapter.request_coupon(_FakeBot(), "+998901234567")
+        assert False, "UnrecognizedBotResponseError kutilgan edi"
+    except UnrecognizedBotResponseError:
+        pass
+
+
 async def test_real_bot_adapter_check_coupon_raises_when_unrecognized(session_factory):
     async with session_factory() as session:
         await set_pattern(session, "CONFIRMED", "muvaffaqiyatli")

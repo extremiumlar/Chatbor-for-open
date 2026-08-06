@@ -21,9 +21,12 @@ qo'shilgan):
 - Statistika (10), Audit (11.5/12.2), bildirishnoma rejimi (9.1), tizim holati
 - Nomer bo'yicha qidiruv (9.2 `drop find`)
 
-Ataylab yo'q: rol bo'linishi (owner/rop/admin/viewer, TZ 14-bo'lim — "loyiha
-to'liq oydinlashgach hal qilinadi"). Hozircha ro'yxatdagi HAR BIR admin
-hammasini ko'radi (Q51'dagi ko'rish cheklovi rollar aniqlashgach qo'shiladi).
+Audit K-4/J-8 — rol tizimi (owner/rop/dasturchi/admin/kuzatuvchi, TZ
+14-bo'lim) va TZ 11.0 (Q51 — TASDIQLANGAN) ko'rish-cheklovi endi mavjud:
+Owner/Rop hammasini ko'radi, qolgan rollar faqat o'ziga biriktirilgan (yoki
+hali hech kimga biriktirilmagan) mijoz/case'larni ko'radi. Biriktirish
+"🎯 Menga biriktirish" tugmasi (yoki Owner/Rop uchun boshqa adminga
+biriktirish) orqali, mijoz kartochkasida.
 """
 
 import asyncio
@@ -38,21 +41,28 @@ from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Message, TelegramObject
-from sqlalchemy import select
 
 from adminbot_service import keyboards as kb
 from adminbot_service import views
 from adminbot_service.states import (
     AddBotFlow,
+    EditOperatorCodesFlow,
     EditPatternFlow,
     EditTemplateFlow,
+    EditTimeoutFlow,
     SearchFlow,
     UserNoteFlow,
 )
 from core.config import settings
 from core.db import get_session, init_db
-from core.enums import CaseStatus
-from core.logic.admins import ensure_admins_seeded, is_admin
+from core.enums import PROBLEM_STATUSES, CaseStatus
+from core.logic.admins import (
+    can_see_everything,
+    ensure_admins_seeded,
+    get_admin_by_tg_id,
+    list_admins,
+    set_admin_role,
+)
 from core.logic.audit import list_recent, log_action
 from core.logic.bot_patterns import (
     REQUIRED_KEYS as BOT_PATTERN_KEYS,
@@ -62,14 +72,16 @@ from core.logic.bot_patterns import (
 )
 from core.logic.bot_pool import (
     PHONE_FORMATS,
-    BotPoolManager,
     add_bot,
     get_bot,
     list_bots,
+    request_bot_force_release,
     set_bot_active,
     set_bot_phone_format,
 )
 from core.logic.case_admin import (
+    InvalidCaseStateError,
+    assign_customer,
     get_case_bundle,
     list_cases_by_statuses,
     manual_confirm,
@@ -79,33 +91,43 @@ from core.logic.case_admin import (
     set_user_note,
     set_user_safe,
 )
+from core.logic.case_search import search_cases
 from core.logic.customers import cases_for_user
 from core.logic.logging_setup import configure_logging
 from core.logic.phone import extract_phone
-from core.logic.settings_store import is_verbose, set_verbose
+from core.logic.settings_store import (
+    get_customer_timeout_seconds,
+    get_operator_codes,
+    is_verbose,
+    set_customer_timeout_seconds,
+    set_operator_codes,
+    set_verbose,
+)
 from core.logic.stats import gather_stats
 from core.logic.templates import DEFAULTS, ensure_templates_seeded, get_template, list_templates, set_template
-from core.models import Case, CouponAttempt, User
+from core.models import Admin, AdminRole, Case, User
 
 configure_logging("adminbot")
 log = logging.getLogger("adminbot")
 
-PROBLEM_STATUSES = [
-    CaseStatus.DUPLICATE_ACTIVE,
-    CaseStatus.NEEDS_ADMIN,
-    CaseStatus.SUSPICIOUS_HOLD,
-    CaseStatus.TIMEOUT,
-]
-
 
 class IsAdmin(BaseFilter):
-    """TZ 12.2 — faqat `admins` jadvalidagi Telegram ID-lar buyruq bera oladi."""
+    """TZ 12.2 — faqat `admins` jadvalidagi Telegram ID-lar buyruq bera oladi.
 
-    async def __call__(self, message: Message) -> bool:
+    Audit K-4 — topilsa `Admin` qatorining o'zini ("current_admin" nomi
+    bilan) handler kwarg'iga in'ektsiya qiladi (aiogram 3 filtrlarning
+    dict qaytarish imkoniyati) — har bir handler o'zi qayta so'rov
+    qilmasdan joriy adminning id/rolini olishi uchun.
+    """
+
+    async def __call__(self, message: Message) -> bool | dict:
         if message.from_user is None:
             return False
         async with get_session() as session:
-            return await is_admin(session, message.from_user.id)
+            admin = await get_admin_by_tg_id(session, message.from_user.id)
+        if admin is None:
+            return False
+        return {"current_admin": admin}
 
 
 admin_router = Router(name="admin")
@@ -138,15 +160,22 @@ class ResetStateOnMenuPress(BaseMiddleware):
 admin_router.message.outer_middleware(ResetStateOnMenuPress())
 
 
-async def _guard(callback: CallbackQuery) -> bool:
-    """Inline tugma bosgan odam haqiqatan adminmi (TZ 12.2)."""
+async def _guard(callback: CallbackQuery) -> Admin | None:
+    """Inline tugma bosgan odam haqiqatan adminmi (TZ 12.2).
+
+    Audit K-4 — endi `bool` emas, topilgan `Admin` qatorini (yoki `None`ni)
+    qaytaradi, chunki ko'p handler'larga ko'rish-cheklash uchun joriy
+    adminning id/roli kerak bo'ladi. Mavjud `if not await _guard(...): return`
+    chaqiruvlari o'zgarishsiz to'g'ri ishlayveradi (`None` ham "yolg'on").
+    """
     if callback.from_user is None:
-        return False
+        return None
     async with get_session() as session:
-        if not await is_admin(session, callback.from_user.id):
-            await callback.answer("Sizda ruxsat yo'q.", show_alert=True)
-            return False
-    return True
+        admin = await get_admin_by_tg_id(session, callback.from_user.id)
+    if admin is None:
+        await callback.answer("Sizda ruxsat yo'q.", show_alert=True)
+        return None
+    return admin
 
 
 async def _edit(callback: CallbackQuery, text: str, markup=None) -> None:
@@ -187,11 +216,20 @@ async def show_help(message: Message) -> None:
 
 @admin_router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery) -> None:
+    # Audit N-2 — boshqa barcha callback handler'lardan farqli, bu ikkovi
+    # `_guard()` chaqirmasdi. Amaliy xavfi past (bu tugmalar faqat
+    # adminlarga yuborilgan xabarlarda ko'rinadi), lekin izchillik uchun
+    # va kelajakda kod ko'chirilganda/qayta ishlatilganda xato manbai
+    # bo'lmasligi uchun qo'shildi.
+    if await _guard(callback) is None:
+        return
     await callback.answer()
 
 
 @admin_router.callback_query(F.data == "cancel")
 async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _guard(callback) is None:  # Audit N-2
+        return
     await state.clear()
     await _edit(callback, "Bekor qilindi.")
     await callback.answer()
@@ -312,26 +350,29 @@ async def cb_bot_format_set(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.regexp(r"^bot:\d+:free$"))
 async def cb_bot_force_free(callback: CallbackQuery) -> None:
-    """TZ 12 — osilib qolgan botni majburan bo'shatish (lane leak oldini olish)."""
+    """TZ 12 — osilib qolgan botni majburan bo'shatish (lane leak oldini olish).
+
+    Audit J-4 — avval bu yerda YANGI, DISKONNEKT `BotPoolManager()` yaratib
+    faqat DB bayrog'i tozalanardi — bu Teletonning HAQIQIY, jarayon-ichidagi
+    navbatiga (`pool._queue`) hech qanday ta'sir qilmasdi: agar hamma bot
+    band bo'lib case'lar navbatda kutayotgan bo'lsa, "bo'shatilgan" bot
+    navbatdagi case'ni olmasdan bekorga bo'sh turaverardi. Endi
+    `admin_redispatch_requested` bilan bir xil naqsh ishlatiladi.
+    """
     if not await _guard(callback):
         return
     bot_id = int(callback.data.split(":")[1])
 
     async with get_session() as session:
-        bot = await get_bot(session, bot_id)
+        bot = await request_bot_force_release(session, bot_id)
         if bot is None:
             await callback.answer("Bot topilmadi.", show_alert=True)
             return
-        # Adminbot'da pool navbati yo'q (u Teleton xotirasida) — shuning uchun
-        # faqat DB'dagi band-lik bayrog'i tozalanadi, navbat Teleton tomonida
-        # o'z holicha davom etadi.
-        await BotPoolManager().release(session, bot_id)
         await log_action(session, callback.from_user.id, "bot_force_free", f"@{bot.username}")
-        bot = await get_bot(session, bot_id)
         text, markup = views.bot_card(bot), kb.bot_card(bot)
 
     await _edit(callback, text, markup)
-    await callback.answer("Bot bo'shatildi.")
+    await callback.answer("So'rov yuborildi — Teleton tez orada bo'shatadi.")
 
 
 @admin_router.callback_query(F.data == "bot:add")
@@ -554,10 +595,20 @@ async def on_pattern_text(message: Message, state: FSMContext) -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def _case_page(kind: str, page: int):
+async def _case_page(kind: str, page: int, current_admin: Admin):
     statuses = PROBLEM_STATUSES if kind == "pr" else [CaseStatus.NUMBER_RECEIVED]
+    can_all = can_see_everything(current_admin)
     async with get_session() as session:
-        cases = await list_cases_by_statuses(session, statuses, limit=200)
+        # Audit K-4 (TZ 11.0, Q51) — oddiy admin faqat o'ziga biriktirilgan
+        # (yoki hali hech kimga biriktirilmagan) mijozlarning case'larini
+        # ko'radi; Owner/Rop hammasini ko'radi.
+        cases = await list_cases_by_statuses(
+            session,
+            statuses,
+            limit=200,
+            viewer_admin_id=current_admin.id,
+            can_see_all=can_all,
+        )
     total = len(cases)
     start = page * kb.PAGE_SIZE
     return cases[start : start + kb.PAGE_SIZE], total
@@ -565,8 +616,8 @@ async def _case_page(kind: str, page: int):
 
 @admin_router.message(Command("problems"))
 @admin_router.message(F.text == kb.BTN_PROBLEMS)
-async def show_problems(message: Message) -> None:
-    page_items, total = await _case_page("pr", 0)
+async def show_problems(message: Message, current_admin: Admin) -> None:
+    page_items, total = await _case_page("pr", 0, current_admin)
     await message.answer(
         views.case_list_text("pr", total), reply_markup=kb.case_list(page_items, "pr", 0, total)
     )
@@ -574,8 +625,8 @@ async def show_problems(message: Message) -> None:
 
 @admin_router.message(Command("pending"))
 @admin_router.message(F.text == kb.BTN_PENDING)
-async def show_pending(message: Message) -> None:
-    page_items, total = await _case_page("pn", 0)
+async def show_pending(message: Message, current_admin: Admin) -> None:
+    page_items, total = await _case_page("pn", 0, current_admin)
     await message.answer(
         views.case_list_text("pn", total), reply_markup=kb.case_list(page_items, "pn", 0, total)
     )
@@ -583,10 +634,11 @@ async def show_pending(message: Message) -> None:
 
 @admin_router.callback_query(F.data.regexp(r"^nav:(problems|pending)$"))
 async def cb_case_list_root(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     kind = "pr" if callback.data.endswith("problems") else "pn"
-    page_items, total = await _case_page(kind, 0)
+    page_items, total = await _case_page(kind, 0, admin)
     await _edit(
         callback, views.case_list_text(kind, total), kb.case_list(page_items, kind, 0, total)
     )
@@ -595,29 +647,47 @@ async def cb_case_list_root(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.regexp(r"^pg:(pr|pn):\d+$"))
 async def cb_case_page(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     _, kind, raw_page = callback.data.split(":")
     page = int(raw_page)
-    page_items, total = await _case_page(kind, page)
+    page_items, total = await _case_page(kind, page, admin)
     await _edit(
         callback, views.case_list_text(kind, total), kb.case_list(page_items, kind, page, total)
     )
     await callback.answer()
 
 
-@admin_router.callback_query(F.data.regexp(r"^cs:\d+$"))
+@admin_router.callback_query(F.data.regexp(r"^cs:\d+(:(pr|pn):\d+|:sr:\d+:\d+)?$"))
 async def cb_case_card(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
-    case_id = int(callback.data.split(":")[1])
+    parts = callback.data.split(":")
+    case_id = int(parts[1])
+
+    # Audit O-3 — case ro'yxatidan ("pr"/"pn"/"sr") kelingan bo'lsa, "⬅️
+    # Orqaga" tugmasi shu manbaga (aynan o'sha sahifaga) qaytishi uchun
+    # callback_data'dagi manba ma'lumoti o'qiladi. Yo'q bo'lsa (masalan
+    # notifier alertidan to'g'ridan-to'g'ri kelingan bo'lsa) standart
+    # "Muammolar" ro'yxatiga qaytadi.
+    back = "nav:problems"
+    if len(parts) == 4 and parts[2] in ("pr", "pn"):
+        back = f"pg:{parts[2]}:{parts[3]}"
+    elif len(parts) == 5 and parts[2] == "sr":
+        back = f"pg:sr:{parts[3]}:{parts[4]}"
+
+    can_all = can_see_everything(admin)
     async with get_session() as session:
-        bundle = await get_case_bundle(session, case_id)
+        bundle = await get_case_bundle(
+            session, case_id, viewer_admin_id=admin.id, can_see_all=can_all
+        )
         if bundle is None:
             await callback.answer("Murojaat topilmadi.", show_alert=True)
             return
         case, user, attempts = bundle
-        text, markup = views.case_card(case, user, attempts), kb.case_card(case, user)
+        text, markup = views.case_card(case, user, attempts), kb.case_card(case, user, back=back)
     await _edit(callback, text, markup)
     await callback.answer()
 
@@ -629,25 +699,55 @@ async def cb_case_card(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.regexp(r"^cs:\d+:(ok|no|again)$"))
 async def cb_case_resolve(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     _, raw_id, action = callback.data.split(":")
     case_id = int(raw_id)
+    can_all = can_see_everything(admin)
 
     async with get_session() as session:
-        if action == "ok":
-            case = await manual_confirm(session, case_id)
-            label, note = "manual_confirm", "✅ Qo'lda TASDIQLANDI."
-        elif action == "no":
-            case = await manual_reject(session, case_id)
-            label, note = "manual_reject", "❌ Qo'lda RAD ETILDI."
-        else:
-            case = await request_redispatch(session, case_id)
-            label, note = (
-                "request_redispatch",
-                "🔄 Qayta uzatish so'raldi — Teleton bo'sh bot topib mijozdan "
-                "kuponni qaytadan so'raydi.",
+        # Audit K-4 — boshqa adminga biriktirilgan case ustida amal
+        # bajarilishidan oldin ko'rish huquqi tekshiriladi.
+        visible = await get_case_bundle(
+            session, case_id, viewer_admin_id=admin.id, can_see_all=can_all
+        )
+        if visible is None:
+            await callback.answer("Murojaat topilmadi.", show_alert=True)
+            return
+        try:
+            if action == "ok":
+                case = await manual_confirm(session, case_id)
+                label, note = "manual_confirm", "✅ Qo'lda TASDIQLANDI."
+            elif action == "no":
+                case = await manual_reject(session, case_id)
+                label, note = "manual_reject", "❌ Qo'lda RAD ETILDI."
+            else:
+                case = await request_redispatch(session, case_id)
+                label, note = (
+                    "request_redispatch",
+                    "🔄 Qayta uzatish so'raldi — Teleton bo'sh bot topib mijozdan "
+                    "kuponni qaytadan so'raydi.",
+                )
+        except InvalidCaseStateError:
+            # Audit K-3 — case holati bu amal ko'rsatilgandan keyin allaqachon
+            # o'zgargan (masalan boshqa admin yoki Teleton uni yopib ulgurgan) —
+            # eskirgan tugmani yana bosishga urinilgan. Hech narsa o'zgartirmay,
+            # kartochkani joriy (haqiqiy) holat bilan yangilab ko'rsatamiz.
+            bundle = await get_case_bundle(session, case_id)
+            if bundle is None:
+                await callback.answer("Murojaat topilmadi.", show_alert=True)
+                return
+            case, user, attempts = bundle
+            text = (
+                views.case_card(case, user, attempts)
+                + "\n\n⚠️ Bu murojaat holati allaqachon o'zgargan — bu amalni "
+                "endi bajarib bo'lmaydi."
             )
+            markup = kb.case_card(case, user)
+            await _edit(callback, text, markup)
+            await callback.answer("Holat allaqachon o'zgargan.", show_alert=True)
+            return
 
         if case is None:
             await callback.answer("Murojaat topilmadi.", show_alert=True)
@@ -720,30 +820,49 @@ async def cb_block_user(callback: CallbackQuery) -> None:
 # --------------------------------------------------------------------------- #
 
 
+async def _load_visible_user(session, user_id: int, admin: Admin) -> User | None:
+    """Audit K-4 — mijozni faqat ko'rish huquqi bo'lsa qaytaradi (boshqa
+    adminga biriktirilgan bo'lsa `None` — "topilmadi" bilan bir xil javob)."""
+    user = await session.get(User, user_id)
+    if user is None:
+        return None
+    if not can_see_everything(admin):
+        if user.assigned_admin_id is not None and user.assigned_admin_id != admin.id:
+            return None
+    return user
+
+
 @admin_router.callback_query(F.data.regexp(r"^usr:\d+$"))
 async def cb_user_card(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     user_id = int(callback.data.split(":")[1])
     async with get_session() as session:
-        user = await session.get(User, user_id)
+        user = await _load_visible_user(session, user_id, admin)
         if user is None:
             await callback.answer("Mijoz topilmadi.", show_alert=True)
             return
         cases = await cases_for_user(session, user_id)
-        text, markup = views.user_card(user, cases), kb.user_card(user)
+        text = views.user_card(user, cases)
+        markup = kb.user_card(user, can_assign=can_see_everything(admin), viewer_admin_id=admin.id)
     await _edit(callback, text, markup)
     await callback.answer()
 
 
 @admin_router.callback_query(F.data.regexp(r"^usr:\d+:(block|unblock|safe)$"))
 async def cb_user_flag(callback: CallbackQuery) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     _, raw_id, action = callback.data.split(":")
     user_id = int(raw_id)
 
     async with get_session() as session:
+        if await _load_visible_user(session, user_id, admin) is None:
+            await callback.answer("Mijoz topilmadi.", show_alert=True)
+            return
+
         if action == "block":
             user = await set_user_blocked(session, user_id, True)
             label, note = "block_user", "Bloklandi."
@@ -754,12 +873,10 @@ async def cb_user_flag(callback: CallbackQuery) -> None:
             user = await set_user_safe(session, user_id, True)
             label, note = "mark_safe", "Xavfsiz deb belgilandi."
 
-        if user is None:
-            await callback.answer("Mijoz topilmadi.", show_alert=True)
-            return
         await log_action(session, callback.from_user.id, label, f"user #{user_id}")
         cases = await cases_for_user(session, user_id)
-        text, markup = views.user_card(user, cases), kb.user_card(user)
+        text = views.user_card(user, cases)
+        markup = kb.user_card(user, can_assign=can_see_everything(admin), viewer_admin_id=admin.id)
 
     await _edit(callback, text, markup)
     await callback.answer(note)
@@ -767,9 +884,14 @@ async def cb_user_flag(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.regexp(r"^usr:\d+:note$"))
 async def cb_user_note(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await _guard(callback):
+    admin = await _guard(callback)
+    if admin is None:
         return
     user_id = int(callback.data.split(":")[1])
+    async with get_session() as session:
+        if await _load_visible_user(session, user_id, admin) is None:
+            await callback.answer("Mijoz topilmadi.", show_alert=True)
+            return
     await state.update_data(user_id=user_id)
     await state.set_state(UserNoteFlow.waiting_note)
     await _edit(
@@ -782,7 +904,7 @@ async def cb_user_note(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @admin_router.message(UserNoteFlow.waiting_note)
-async def on_user_note(message: Message, state: FSMContext) -> None:
+async def on_user_note(message: Message, state: FSMContext, current_admin: Admin) -> None:
     note = (message.text or "").strip()
     if not note:
         await message.answer("Izoh bo'sh. Qayta yuboring.")
@@ -791,15 +913,71 @@ async def on_user_note(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     async with get_session() as session:
-        user = await set_user_note(session, user_id, note)
-        if user is None:
+        if await _load_visible_user(session, user_id, current_admin) is None:
             await message.answer("Mijoz topilmadi.")
             return
+        user = await set_user_note(session, user_id, note)
         await log_action(session, message.from_user.id, "user_note", f"user #{user_id}")
         cases = await cases_for_user(session, user_id)
-        text, markup = views.user_card(user, cases), kb.user_card(user)
+        text = views.user_card(user, cases)
+        markup = kb.user_card(
+            user, can_assign=can_see_everything(current_admin), viewer_admin_id=current_admin.id
+        )
 
     await message.answer(text, reply_markup=markup)
+
+
+# --------------------------------------------------------------------------- #
+# Mijozni adminga biriktirish (TZ 11.0/11.1, Q51) — K-4
+# --------------------------------------------------------------------------- #
+
+
+@admin_router.callback_query(F.data.regexp(r"^usr:\d+:claim$"))
+async def cb_user_claim(callback: CallbackQuery) -> None:
+    """Har qanday admin hali hech kimga biriktirilmagan mijozni "o'ziga
+    olishi" mumkin — shundan keyin faqat Owner/Rop + shu admin ko'radi."""
+    admin = await _guard(callback)
+    if admin is None:
+        return
+    user_id = int(callback.data.split(":")[1])
+    async with get_session() as session:
+        user = await _load_visible_user(session, user_id, admin)
+        if user is None:
+            await callback.answer("Mijoz topilmadi.", show_alert=True)
+            return
+        if user.assigned_admin_id is not None and user.assigned_admin_id != admin.id:
+            await callback.answer("Bu mijoz allaqachon boshqa adminga biriktirilgan.", show_alert=True)
+            return
+        user = await assign_customer(session, user_id, admin.id)
+        await log_action(session, callback.from_user.id, "claim_customer", f"user #{user_id}")
+        cases = await cases_for_user(session, user_id)
+        text = views.user_card(user, cases)
+        markup = kb.user_card(user, can_assign=can_see_everything(admin), viewer_admin_id=admin.id)
+    await _edit(callback, text, markup)
+    await callback.answer("Sizga biriktirildi.")
+
+
+@admin_router.callback_query(F.data.regexp(r"^usr:\d+:unassign$"))
+async def cb_user_unassign(callback: CallbackQuery) -> None:
+    """Owner/Rop — mijozni "hech kimga biriktirilmagan" holatga qaytaradi."""
+    admin = await _guard(callback)
+    if admin is None:
+        return
+    if not can_see_everything(admin):
+        await callback.answer("Faqat Owner/Rop bu amalni bajara oladi.", show_alert=True)
+        return
+    user_id = int(callback.data.split(":")[1])
+    async with get_session() as session:
+        user = await assign_customer(session, user_id, None)
+        if user is None:
+            await callback.answer("Mijoz topilmadi.", show_alert=True)
+            return
+        await log_action(session, callback.from_user.id, "unassign_customer", f"user #{user_id}")
+        cases = await cases_for_user(session, user_id)
+        text = views.user_card(user, cases)
+        markup = kb.user_card(user, can_assign=True, viewer_admin_id=admin.id)
+    await _edit(callback, text, markup)
+    await callback.answer("Biriktirish bekor qilindi.")
 
 
 # --------------------------------------------------------------------------- #
@@ -818,7 +996,7 @@ async def start_search(message: Message, state: FSMContext) -> None:
 
 
 @admin_router.message(SearchFlow.waiting_phone)
-async def on_search_phone(message: Message, state: FSMContext) -> None:
+async def on_search_phone(message: Message, state: FSMContext, current_admin: Admin) -> None:
     phone = extract_phone(message.text or "")
     if phone is None:
         await message.answer(
@@ -826,7 +1004,7 @@ async def on_search_phone(message: Message, state: FSMContext) -> None:
         )
         return
     await state.clear()
-    await _send_search_results(message, phone)
+    await _send_search_results(message, phone, current_admin)
 
 
 @admin_router.message(Command("audit"))
@@ -837,7 +1015,7 @@ async def cmd_audit(message: Message) -> None:
 
 
 @admin_router.message(F.text.func(lambda t: t and t.lower().startswith("drop find")))
-async def cmd_drop_find(message: Message) -> None:
+async def cmd_drop_find(message: Message, current_admin: Admin) -> None:
     raw = message.text[len("drop find") :].strip()
     phone = extract_phone(raw) if raw else None
     if phone is None:
@@ -846,35 +1024,64 @@ async def cmd_drop_find(message: Message) -> None:
             "Yoki menyudagi 🔍 <b>Nomer qidirish</b> tugmasidan foydalaning."
         )
         return
-    await _send_search_results(message, phone)
+    await _send_search_results(message, phone, current_admin)
 
 
 @admin_router.message(
     ~F.text.startswith("/"),
     F.text.func(lambda t: t and extract_phone(t) is not None),
 )
-async def on_bare_phone(message: Message) -> None:
+async def on_bare_phone(message: Message, current_admin: Admin) -> None:
     """Admin shunchaki nomer yuborsa — darhol qidiruv (qulaylik uchun).
 
     Buyruqlar ataylab chetlab o'tiladi: `/settemplate CONFIRMED ... 998901234567 ...`
     kabi ichida nomer bo'lgan buyruq bu handler'ga tushib ketmasligi kerak
     (u ro'yxatda buyruq handler'laridan oldin turadi).
     """
-    await _send_search_results(message, extract_phone(message.text))
+    await _send_search_results(message, extract_phone(message.text), current_admin)
 
 
-async def _send_search_results(message: Message, phone: str) -> None:
+async def _search_case_page(phone: str, page: int, current_admin: Admin):
+    can_all = can_see_everything(current_admin)
     async with get_session() as session:
-        cases = (
-            await session.execute(select(Case).where(Case.phone == phone).order_by(Case.id.desc()))
-        ).scalars().all()
+        # Audit K-4 (TZ 11.0, Q51) — qidiruv ham ko'rish-cheklashiga bo'ysunadi.
+        cases = await search_cases(
+            session, phone=phone, viewer_admin_id=current_admin.id, can_see_all=can_all
+        )
+    total = len(cases)
+    start = page * kb.PAGE_SIZE
+    return cases[start : start + kb.PAGE_SIZE], total
 
-    if not cases:
+
+async def _send_search_results(message: Message, phone: str, current_admin: Admin) -> None:
+    page_items, total = await _search_case_page(phone, 0, current_admin)
+
+    if total == 0:
         await message.answer(f"<code>{phone}</code> bo'yicha murojaat topilmadi.")
         return
 
-    header = f"🔍 <code>{phone}</code> — {len(cases)} ta murojaat:"
-    await message.answer(header, reply_markup=kb.case_list(list(cases)[: kb.PAGE_SIZE], "pr", 0, 0))
+    header = f"🔍 <code>{phone}</code> — {total} ta murojaat:"
+    # Audit J-6 — avval `total` argumenti qattiq kodlangan 0 edi, shuning
+    # uchun 8 tadan ortiq natija bo'lsa sahifalash tugmalari HECH QACHON
+    # chiqmasdi — qolgan natijalarga UI orqali umuman yetib bo'lmasdi.
+    # Endi haqiqiy `total` va o'ziga xos "sr" kind + nomer (`extra`) orqali
+    # to'g'ri sahifalanadi.
+    await message.answer(
+        header, reply_markup=kb.case_list(page_items, "sr", 0, total, extra=phone)
+    )
+
+
+@admin_router.callback_query(F.data.regexp(r"^pg:sr:\d+:\d+$"))
+async def cb_search_page(callback: CallbackQuery) -> None:
+    admin = await _guard(callback)
+    if admin is None:
+        return
+    _, _, phone, raw_page = callback.data.split(":")
+    page = int(raw_page)
+    page_items, total = await _search_case_page(phone, page, admin)
+    header = f"🔍 <code>{phone}</code> — {total} ta murojaat:"
+    await _edit(callback, header, kb.case_list(page_items, "sr", page, total, extra=phone))
+    await callback.answer()
 
 
 # --------------------------------------------------------------------------- #
@@ -966,6 +1173,117 @@ async def cb_health(callback: CallbackQuery) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Operator kodlari va mijoz-timeout (TZ 2.2, 4.1) — audit J-9
+# --------------------------------------------------------------------------- #
+
+
+def _opcodes_text(codes: list[str]) -> str:
+    return (
+        "📱 <b>Operator kodlari</b> (TZ 4.1)\n\n"
+        "Nomer aniqlashda haqiqiy O'zbekiston operator prefiksi sifatida "
+        "qabul qilinadigan kodlar:\n\n"
+        f"<code>{', '.join(codes)}</code>"
+    )
+
+
+@admin_router.callback_query(F.data == "nav:opcodes")
+async def cb_opcodes_menu(callback: CallbackQuery) -> None:
+    if not await _guard(callback):
+        return
+    async with get_session() as session:
+        codes = await get_operator_codes(session)
+    await _edit(callback, _opcodes_text(codes), kb.opcodes_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "opcodes:edit")
+async def cb_opcodes_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _guard(callback):
+        return
+    await state.set_state(EditOperatorCodesFlow.waiting_text)
+    await _edit(
+        callback,
+        "✏️ Yangi operator kodlari ro'yxatini vergul bilan ajratib yuboring.\n\n"
+        "<i>Masalan:</i> <code>90, 91, 93, 94, 95, 97, 98, 99, 33, 88, 20</code>",
+        kb.cancel_only(),
+    )
+    await callback.answer()
+
+
+@admin_router.message(EditOperatorCodesFlow.waiting_text)
+async def on_opcodes_text(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    codes = [c.strip() for c in raw.split(",") if c.strip()]
+    if not codes or not all(c.isdigit() for c in codes):
+        await message.answer(
+            "Noto'g'ri format. Faqat raqamlarni vergul bilan ajratib yuboring "
+            "(masalan: <code>90, 91, 93</code>)."
+        )
+        return
+    await state.clear()
+
+    async with get_session() as session:
+        await set_operator_codes(session, codes)
+        await log_action(session, message.from_user.id, "set_operator_codes", ", ".join(codes))
+
+    await message.answer(f"✅ Yangilandi:\n\n{_opcodes_text(codes)}", reply_markup=kb.opcodes_menu())
+
+
+def _timeout_text(seconds: float) -> str:
+    minutes = seconds / 60
+    return (
+        "⏱ <b>Kupon kutish vaqti</b> (TZ 2.2)\n\n"
+        f"Mijoz nomer yuborgach, kupon uchun <b>{seconds:.0f} soniya</b> "
+        f"(~{minutes:.1f} daqiqa) kutiladi. Shu vaqt ichida kupon kelmasa, "
+        "seans to'xtatiladi va bot bo'shatiladi."
+    )
+
+
+@admin_router.callback_query(F.data == "nav:timeout")
+async def cb_timeout_menu(callback: CallbackQuery) -> None:
+    if not await _guard(callback):
+        return
+    async with get_session() as session:
+        seconds = await get_customer_timeout_seconds(session)
+    await _edit(callback, _timeout_text(seconds), kb.timeout_menu())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "timeout:edit")
+async def cb_timeout_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _guard(callback):
+        return
+    await state.set_state(EditTimeoutFlow.waiting_text)
+    await _edit(
+        callback,
+        "✏️ Yangi kutish vaqtini SONIYADA yuboring (masalan <code>300</code> — 5 daqiqa).",
+        kb.cancel_only(),
+    )
+    await callback.answer()
+
+
+@admin_router.message(EditTimeoutFlow.waiting_text)
+async def on_timeout_text(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    try:
+        seconds = float(raw)
+    except ValueError:
+        await message.answer("Noto'g'ri qiymat. Faqat son yuboring (masalan 300).")
+        return
+    await state.clear()
+
+    async with get_session() as session:
+        try:
+            await set_customer_timeout_seconds(session, seconds)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await log_action(session, message.from_user.id, "set_customer_timeout", str(seconds))
+
+    await message.answer(f"✅ Yangilandi:\n\n{_timeout_text(seconds)}", reply_markup=kb.timeout_menu())
+
+
+# --------------------------------------------------------------------------- #
 # Eski buyruqlar bilan moslik (TZ 9.2) — tugmalar asosiy yo'l bo'lsa ham
 # buyruqlar ishlashda davom etadi.
 # --------------------------------------------------------------------------- #
@@ -991,6 +1309,13 @@ async def cmd_addbot(message: Message, command: CommandObject) -> None:
 
     username = parts[0].lstrip("@")
     phone_format = parts[1] if len(parts) > 1 else PHONE_FORMATS[0]
+
+    if phone_format not in PHONE_FORMATS:
+        await message.answer(
+            f"Noto'g'ri format: <code>{phone_format}</code>\n"
+            f"Ruxsat etilganlar: {', '.join(PHONE_FORMATS)}"
+        )
+        return
 
     async with get_session() as session:
         bot = await add_bot(session, username, phone_format, needs_start_greeting=needs_start)
@@ -1044,6 +1369,47 @@ async def _set_via_command(message: Message, command: CommandObject, kind: str) 
             await log_action(session, message.from_user.id, "setbotpattern", f"{key} -> {value}")
 
     await message.answer(f"✅ <b>{key}</b> yangilandi:\n\n{value}")
+
+
+@admin_router.message(Command("admins"))
+async def cmd_admins(message: Message) -> None:
+    """Audit K-4/J-8 — ro'yxatdagi adminlar va ularning rollari (TZ 14)."""
+    async with get_session() as session:
+        admins = await list_admins(session)
+    lines = [f"<code>{a.tg_user_id}</code> — <b>{a.role.value}</b> ({a.name})" for a in admins]
+    await message.answer("👥 <b>Adminlar</b>\n\n" + "\n".join(lines))
+
+
+@admin_router.message(Command("setrole"))
+async def cmd_setrole(message: Message, command: CommandObject, current_admin: Admin) -> None:
+    """Audit K-4/J-8 — faqat OWNER boshqa adminning rolini o'zgartira oladi
+    (TZ 14-bo'lim: Owner — hammasi)."""
+    if current_admin.role != AdminRole.OWNER:
+        await message.answer("Faqat Owner rol o'zgartira oladi.")
+        return
+    if not command.args or len(command.args.split()) != 2:
+        roles = ", ".join(r.value for r in AdminRole)
+        await message.answer(
+            f"Format: <code>/setrole &lt;telegram_id&gt; &lt;ROL&gt;</code>\nRollar: {roles}"
+        )
+        return
+    raw_tg_id, raw_role = command.args.split()
+    try:
+        role = AdminRole(raw_role.upper())
+    except ValueError:
+        await message.answer(f"Noma'lum rol: {raw_role}")
+        return
+
+    async with get_session() as session:
+        target = await get_admin_by_tg_id(session, int(raw_tg_id))
+        if target is None:
+            await message.answer("Bunday telegram_id bilan admin topilmadi (avval /admins bilan tekshiring).")
+            return
+        updated = await set_admin_role(session, target.id, role)
+        await log_action(
+            session, message.from_user.id, "set_admin_role", f"admin #{updated.id} -> {role.value}"
+        )
+    await message.answer(f"✅ <code>{raw_tg_id}</code> endi <b>{role.value}</b>.")
 
 
 @admin_router.message(Command("botpatterns"))

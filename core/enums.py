@@ -44,3 +44,41 @@ ACTIVE_STATUSES = frozenset(
 PENDING_STATUSES = ACTIVE_STATUSES | frozenset(
     {CaseStatus.EXPIRED, CaseStatus.NEEDS_ADMIN, CaseStatus.SUSPICIOUS_HOLD}
 )
+
+# Audit K-1 tuzatishi — case_manager.handle_phone_detected'ning "bu case hali
+# hal bo'lmagan, avtomatik dispatch qilinmasin" tekshiruvi shu ro'yxatga
+# qaraydi. Oldin faqat (NEEDS_ADMIN, SUSPICIOUS_HOLD) tekshirilardi — TIMEOUT
+# va DUPLICATE_ACTIVE holatlari tushib qolgani uchun ular bo'yicha kelgan
+# takroriy xabar "yangi murojaat" deb noto'g'ri qabul qilinardi (K-1).
+HELD_STATUSES = frozenset(
+    {
+        CaseStatus.NEEDS_ADMIN,
+        CaseStatus.SUSPICIOUS_HOLD,
+        CaseStatus.TIMEOUT,
+        CaseStatus.DUPLICATE_ACTIVE,
+    }
+)
+
+# Audit K-3 tuzatishi — admin qo'lda Tasdiqlash/Rad/Qayta-uzatish qila
+# oladigan holatlar (TZ 9.3). kb.case_card (tugma ko'rsatish) va
+# core.logic.case_admin (server tomoni tekshiruvi) ikkovi ham shu bitta
+# ro'yxatdan foydalanadi — ikkalasi mos kelmay qolmasligi uchun.
+MANUAL_RESOLVABLE_STATUSES = frozenset(
+    {
+        CaseStatus.NEEDS_ADMIN,
+        CaseStatus.TIMEOUT,
+        CaseStatus.DUPLICATE_ACTIVE,
+        CaseStatus.EXPIRED,
+        CaseStatus.CUSTOMER_TIMEOUT,
+    }
+)
+
+# Audit O-2 — "muammoli holatlar" (TZ 10-bo'lim). Avval adminbot_service/bot.py
+# (⚠️ Muammolar ro'yxati) va core/logic/stats.py (📊 Statistikadagi
+# "muammoli holatlar soni") har biri O'Z, bir-biriga mos kelmaydigan
+# nusxasini tutardi — adminbot TIMEOUT'ni ham qamrab olardi, stats esa
+# yo'q, shuning uchun ikki ekrandagi son hech qachon to'g'ri kelmasdi.
+# Bu ro'yxat ma'no jihatidan HELD_STATUSES bilan bir xil (case admin
+# e'tiborini kutmoqda) — shuning uchun uni alias qilamiz, ikkita alohida
+# qo'lda yozilgan ro'yxat o'rniga.
+PROBLEM_STATUSES = HELD_STATUSES

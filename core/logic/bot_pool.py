@@ -58,7 +58,15 @@ async def add_bot(
     `owner_admin_id` — MVP-5 (Q55): berilmasa (None) bot umumiy (bitta akkaunt)
     pool'ga tegishli bo'ladi, aks holda faqat shu admin'ning Teleton sessiyasi
     undan foydalana oladi (har admin+bot mustaqil slot).
+
+    Audit K-2 — format `set_bot_phone_format()`dagi kabi shu yerda ham
+    tekshiriladi. Oldin faqat keyinroq o'zgartirishda tekshirilardi — bot
+    BIRINCHI marta noto'g'ri format bilan qo'shilsa, birinchi mijoz shu
+    botga tushganda `format_for_bot()` kutilmagan `ValueError` chiqarardi va
+    bot abadiy "band" bo'lib qolardi (lane leak).
     """
+    if phone_format not in PHONE_FORMATS:
+        raise ValueError(f"Noma'lum format: {phone_format}")
     result = await session.execute(select(Bot).where(Bot.username == username))
     if result.scalars().first() is not None:
         return None
@@ -89,6 +97,25 @@ async def set_bot_active(session: AsyncSession, bot_id: int, is_active: bool) ->
         return None
     bot.is_active = is_active
     await session.commit()
+    return bot
+
+
+async def request_bot_force_release(session: AsyncSession, bot_id: int) -> Bot | None:
+    """TZ 12 — osilib qolgan botni majburan bo'shatishni SO'RAYDI (audit J-4).
+
+    Adminbot Teleton bilan bir xil jarayonda emas (TZ 13.1), shuning uchun
+    haqiqiy bo'shatishni (jarayon-ichidagi `BotPoolManager.force_release`,
+    navbatdagi case bo'lsa uni darhol tayinlaydi) o'zi bajara olmaydi —
+    faqat bayroq qo'yadi; Teletonning `_force_release_watcher` fon vazifasi
+    ko'rib haqiqiy ishni bajaradi (`admin_redispatch_requested` bilan bir
+    xil naqsh).
+    """
+    bot = await session.get(Bot, bot_id)
+    if bot is None:
+        return None
+    bot.force_release_requested = True
+    await session.commit()
+    await session.refresh(bot)
     return bot
 
 
@@ -125,7 +152,21 @@ class BotPoolManager:
             return bot
 
     async def release(self, session: AsyncSession, bot_id: int) -> None:
-        """Botni bo'shatadi. Navbatda case bo'lsa, darhol shu (yoki boshqa bo'sh) botga tayinlaydi."""
+        """Botni bo'shatadi. Navbatda case bo'lsa, darhol shu (yoki boshqa bo'sh) botga tayinlaydi.
+
+        Audit J-1 — `on_assigned` (navbatdagi case uchun haqiqiy bot-so'rovi;
+        `case_manager._on_queued_case_assigned` orqali sekin/uzoq tarmoq RPC
+        bo'lishi mumkin, backoff bilan bir necha soniyagacha) avval `self._lock`
+        USHLAB TURILGAN holda chaqirilardi — shu vaqt ichida tizimdagi
+        BOSHQA barcha `acquire()`/`release()` chaqiruvlari (ya'ni har qanday
+        boshqa mijozning nomer/kupon jarayoni, hatto butunlay bo'sh
+        botlarga tegishli bo'lsa ham) bloklanardi. Bu TZ 3-bo'limning
+        "parallel kanallar" g'oyasini buzardi. Endi faqat DB-yozish qulf
+        ichida, bot-RPC chaqiruvi qulfdan TASHQARIDA.
+        """
+        next_case_id: int | None = None
+        next_bot: Bot | None = None
+
         async with self._lock:
             bot = await session.get(Bot, bot_id)
             if bot is None:
@@ -136,20 +177,19 @@ class BotPoolManager:
             bot.total_processed += 1
             await session.commit()
 
-            if not self._queue:
-                return
+            if self._queue:
+                next_case_id = self._queue.pop(0)
+                next_bot = await self._select_free_bot(session)
+                if next_bot is None:
+                    # Amalda sodir bo'lmasligi kerak (hozirgina bot bo'shadi),
+                    # lekin xavfsizlik uchun case'ni navbat boshiga qaytaramiz.
+                    self._queue.insert(0, next_case_id)
+                    next_case_id = None
+                else:
+                    await self._assign(session, next_bot, next_case_id)
 
-            next_case_id = self._queue.pop(0)
-            next_bot = await self._select_free_bot(session)
-            if next_bot is None:
-                # Amalda sodir bo'lmasligi kerak (hozirgina bot bo'shadi),
-                # lekin xavfsizlik uchun case'ni navbat boshiga qaytaramiz.
-                self._queue.insert(0, next_case_id)
-                return
-
-            await self._assign(session, next_bot, next_case_id)
-            if self.on_assigned is not None:
-                await self.on_assigned(next_case_id, next_bot.id)
+        if next_case_id is not None and next_bot is not None and self.on_assigned is not None:
+            await self.on_assigned(next_case_id, next_bot.id)
 
     async def force_release(self, session: AsyncSession, bot_id: int) -> None:
         """TIMEOUT holatida botni majburan bo'shatish (12-bo'lim) — release bilan bir xil."""
