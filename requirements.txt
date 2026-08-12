@@ -1,4 +1,7 @@
 telethon==1.44.0
+# Telethon shifrlashni ~10x tezlashtiradi (rasm forward uchun muhim);
+# o'rnatilmasa ham ishlaydi, faqat sekinroq.
+cryptg
 sqlalchemy>=2.0
 aiosqlite
 alembic>=1.13

@@ -64,6 +64,38 @@ class AdminNotifier:
         )
         await self._broadcast(message, markup)
 
+    async def send_failed_confirmation(self, message: str, request_id: int) -> None:
+        """TZ v2 7.1 — FAILED natija: mijozga yuborishdan oldin admin
+        tasdiqlaydi. Tugma callback'ini adminbot jarayoni qabul qiladi
+        (bir xil bot token — Telegram token bo'yicha marshrutlaydi)."""
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📤 Mijozga yuborish", callback_data=f"vres:{request_id}:send"
+                    ),
+                    InlineKeyboardButton(
+                        text="✋ Yo'q", callback_data=f"vres:{request_id}:skip"
+                    ),
+                ]
+            ]
+        )
+        await self._broadcast(message, markup)
+
+    async def send_to_chat(self, chat_id: int, message: str) -> bool:
+        """TZ v2 8.1 — muayyan chat/foydalanuvchiga yuborish (kunlik hisobot:
+        nazorat guruhi va superadmin lichkalari). Bot guruhga a'zo bo'lishi
+        kerak (/setgroup bosqichida allaqachon qo'shilgan)."""
+        if self._bot is None:
+            log.info("CHAT %s: %s", chat_id, message)
+            return False
+        try:
+            await self._bot.send_message(chat_id, message)
+            return True
+        except Exception:
+            log.exception("Chatga yuborib bo'lmadi (chat_id=%s)", chat_id)
+            return False
+
     async def close(self) -> None:
         """Audit N-3 — Teleton jarayoni o'zining `aiogram.Bot` nusxasini
         (Adminbot jarayonidagi asosiy Bot'dan ALOHIDA, chunki ikkovi

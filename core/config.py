@@ -115,6 +115,30 @@ class Settings:
     # bekor bo'ladi (dev uchun qabul qilinadi, production'da .env'da o'rnating).
     panel_session_secret: str = os.getenv("PANEL_SESSION_SECRET") or secrets.token_urlsafe(32)
 
+    # TZ v2 4.2 — ko'p admin sessiyalari papkasi (har admin uchun bitta
+    # .session fayl; 13.4 — qattiq huquq, backupga kirmaydi).
+    sessions_dir: str = os.getenv("SESSIONS_DIR", "./sessions")
+
+    # TZ v2 6.1 a2 — rasmsizlik eslatmasi: birinchisi nomer kelganidan
+    # necha daqiqada, keyin nechta takror (bular .env'da faqat boshlang'ich;
+    # jonli qiymat adminbot orqali settings_store'da).
+    no_screenshot_first_minutes: int = field(
+        default_factory=lambda: _int_env("NO_SCREENSHOT_FIRST_MINUTES", 30)
+    )
+    no_screenshot_reminders: int = field(
+        default_factory=lambda: _int_env("NO_SCREENSHOT_REMINDERS", 3)
+    )
+
+    # TZ v2 6.1 — tekshiruvgacha kutish (mijozga aytilgan "1.5 soat").
+    check_delay_minutes: int = field(
+        default_factory=lambda: _int_env("CHECK_DELAY_MINUTES", 90)
+    )
+
+    # TZ v2 5.1 — albom bo'lmagan rasmlarni bitta partiya deb hisoblash oynasi.
+    image_batch_window_seconds: float = field(
+        default_factory=lambda: _float_env("IMAGE_BATCH_WINDOW_SECONDS", 15.0)
+    )
+
     # openbudget.uz ovozlar ro'yxati (kuponni saytdan tekshirish).
     # `openbudget_vote_token` — captchani ODAM brauzerda yechganda hosil
     # bo'ladigan token (`localStorage.initToken`); avtomatik olinmaydi va

@@ -30,6 +30,8 @@ biriktirish) orqali, mijoz kartochkasida.
 """
 
 import asyncio
+import datetime
+import json
 import logging
 
 from typing import Any, Awaitable, Callable
@@ -40,7 +42,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    TelegramObject,
+)
+from sqlalchemy import select
 
 from adminbot_service import keyboards as kb
 from adminbot_service import views
@@ -95,17 +104,41 @@ from core.logic.case_search import search_cases
 from core.logic.customers import cases_for_user
 from core.logic.logging_setup import configure_logging
 from core.logic.phone import extract_phone
+from core.logic.check_patterns import (
+    AmbiguousMatch,
+    CheckCategory,
+    add_pattern,
+    classify,
+    get_all_patterns,
+    remove_pattern,
+)
 from core.logic.settings_store import (
+    get_checker_account,
     get_customer_timeout_seconds,
+    get_group_chat_id,
     get_operator_codes,
+    is_shadow_mode,
     is_verbose,
+    set_checker_account,
     set_customer_timeout_seconds,
+    set_group_chat_id,
     set_operator_codes,
+    set_shadow_mode,
     set_verbose,
 )
 from core.logic.stats import gather_stats
+from core.logic.v2_stats import gather_v2_stats, render_stats, tashkent_day_start_utc
 from core.logic.templates import DEFAULTS, ensure_templates_seeded, get_template, list_templates, set_template
-from core.models import Admin, AdminRole, Case, User
+from core.models import (
+    Admin,
+    AdminRole,
+    Case,
+    CheckRequest,
+    CheckResult,
+    JobKind,
+    ScheduledJob,
+    User,
+)
 
 configure_logging("adminbot")
 log = logging.getLogger("adminbot")
@@ -1422,6 +1455,516 @@ async def cmd_botpatterns(message: Message) -> None:
         + "\n\n".join(lines),
         reply_markup=kb.template_keys(BOT_PATTERN_KEYS, "b"),
     )
+
+
+# --------------------------------------------------------------------------- #
+# TZ v2 5.2 — nazorat guruhini belgilash (rasm partiyalari shu yerga tushadi).
+# --------------------------------------------------------------------------- #
+
+
+@admin_router.message(Command("setgroup"))
+async def cmd_setgroup(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """Superadmin (OWNER/ROP) nazorat guruhini belgilaydi — TZ v2 5.2.
+
+    Ikki usul:
+    - GURUH ICHIDA `/setgroup` yozilsa — o'sha guruh belgilanadi (eng oson:
+      botni guruhga qo'shib bitta buyruq).
+    - Lichkada `/setgroup <chat_id>` — id qo'lda kiritiladi.
+    """
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop nazorat guruhini belgilay oladi.")
+        return
+
+    if message.chat.type in ("group", "supergroup"):
+        chat_id = message.chat.id
+    elif command.args:
+        try:
+            chat_id = int(command.args.strip())
+        except ValueError:
+            await message.answer(
+                "Format: <code>/setgroup &lt;chat_id&gt;</code> — yoki buyruqni "
+                "to'g'ridan-to'g'ri nazorat guruhining ichida yozing."
+            )
+            return
+    else:
+        async with get_session() as session:
+            current = await get_group_chat_id(session)
+        current_text = (
+            f"Joriy guruh: <code>{current}</code>" if current else "Guruh hali sozlanmagan."
+        )
+        await message.answer(
+            f"{current_text}\n\nBelgilash uchun botni nazorat guruhiga qo'shib, "
+            f"guruh ichida <code>/setgroup</code> yozing (yoki bu yerda "
+            f"<code>/setgroup &lt;chat_id&gt;</code>)."
+        )
+        return
+
+    async with get_session() as session:
+        await set_group_chat_id(session, chat_id)
+        await log_action(
+            session, message.from_user.id, "set_group_chat", str(chat_id)
+        )
+    await message.answer(
+        f"✅ Nazorat guruhi belgilandi: <code>{chat_id}</code>\n"
+        f"Endi rasm partiyalari shu guruhga tushadi.\n\n"
+        f"⚠️ Muhim: ADMIN akkauntlari (Telethon sessiyalari) ham shu guruhga "
+        f"a'zo bo'lishi kerak — forward ular nomidan ketadi."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# TZ v2 8-bo'lim (B-5) — v2 statistika
+# --------------------------------------------------------------------------- #
+
+_VSTATS_PERIODS = {
+    "d": ("Bugun", 0),
+    "w": ("Hafta (7 kun)", 6),
+    "m": ("Oy (30 kun)", 29),
+}
+
+
+def _vstats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Bugun", callback_data="vst:d"),
+                InlineKeyboardButton(text="Hafta", callback_data="vst:w"),
+                InlineKeyboardButton(text="Oy", callback_data="vst:m"),
+            ]
+        ]
+    )
+
+
+async def _build_vstats_text(current_admin: Admin, period: str) -> str:
+    title, days_back = _VSTATS_PERIODS.get(period, _VSTATS_PERIODS["d"])
+    since = tashkent_day_start_utc(datetime.datetime.utcnow(), days_back=days_back)
+
+    # TZ v2 8.4 — oddiy admin FAQAT o'zinikini ko'radi; OWNER/ROP va
+    # can_view_all_stats belgilanganlar hammani ko'radi.
+    unrestricted = (
+        current_admin.role in (AdminRole.OWNER, AdminRole.ROP)
+        or current_admin.can_view_all_stats
+    )
+    filter_admin_id = None if unrestricted else current_admin.id
+
+    async with get_session() as session:
+        report = await gather_v2_stats(session, since, admin_id=filter_admin_id)
+
+    scope = "" if unrestricted else " (faqat sizniki)"
+    return render_stats(report, f"v2 statistika — {title}{scope}")
+
+
+@admin_router.message(Command("setactive"))
+async def cmd_setactive(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """TZ v2 4.2b — adminni nofaol/faol qilish (superadmin).
+
+    Nofaol qilinganda: uning barcha ochiq case'lari MUZLATILADI (taymerlar,
+    eslatmalar, avtomatik tekshiruvlar to'xtaydi — poller/drip is_active'ga
+    qaraydi), Telethon klienti keyingi restart'da ishga tushirilmaydi, va
+    superadminga ochiq case'lar ro'yxati ko'rsatiladi.
+    """
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop admin holatini o'zgartira oladi.")
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2 or parts[1].lower() not in ("on", "off"):
+        await message.answer(
+            "Format: <code>/setactive &lt;telegram_id&gt; on|off</code>\n"
+            "(id'larni /admins ro'yxatidan oling)"
+        )
+        return
+    make_active = parts[1].lower() == "on"
+
+    async with get_session() as session:
+        target = await get_admin_by_tg_id(session, int(parts[0]))
+        if target is None:
+            await message.answer("Bunday telegram_id bilan admin topilmadi.")
+            return
+        target.is_active = make_active
+        await log_action(
+            session,
+            message.from_user.id,
+            "set_admin_active",
+            f"admin #{target.id} -> {'on' if make_active else 'off'}",
+        )
+        await session.commit()
+
+        if make_active:
+            await message.answer(
+                f"🟢 <b>{target.name}</b> faollashtirildi. Muzlatilgan "
+                f"case'lari davom etadi. Telethon sessiyasi keyingi restart'da "
+                f"ulanadi."
+            )
+            return
+
+        # Nofaol — ochiq case'lar ro'yxati (§4.2b: qaror superadminda).
+        from core.enums import V2_OPEN_STATUSES
+
+        result = await session.execute(
+            select(Case, User)
+            .join(User, Case.user_id == User.id)
+            .where(
+                Case.assigned_admin_id == target.id,
+                Case.status.in_(list(V2_OPEN_STATUSES)),
+            )
+            .order_by(Case.id.desc())
+        )
+        open_cases = result.all()
+
+    lines = [
+        f"🔴 <b>{target.name}</b> nofaol qilindi — case'lari muzlatildi "
+        f"(taymerlar, eslatmalar, tekshiruvlar to'xtadi)."
+    ]
+    if open_cases:
+        lines.append(f"\nOchiq case'lari ({len(open_cases)} ta):")
+        for case, user in open_cases[:20]:
+            customer = f"@{user.tg_username}" if user.tg_username else (
+                user.display_name or f"id:{user.tg_user_id}"
+            )
+            lines.append(
+                f"· {case.short_code or case.id} — {case.phone} — {customer} "
+                f"({case.status.value})"
+            )
+        if len(open_cases) > 20:
+            lines.append(f"... va yana {len(open_cases) - 20} ta.")
+        lines.append(
+            "\nBu mijozlar hozir kuzatilmayapti — kimga bog'lanishni o'zingiz "
+            "hal qiling."
+        )
+    else:
+        lines.append("Ochiq case'lari yo'q.")
+    await message.answer("\n".join(lines))
+
+
+@admin_router.message(Command("vstats"))
+async def cmd_vstats(message: Message, current_admin: Admin) -> None:
+    text = await _build_vstats_text(current_admin, "d")
+    await message.answer(text, reply_markup=_vstats_keyboard())
+
+
+@admin_router.callback_query(F.data.startswith("vst:"))
+async def cb_vstats(callback: CallbackQuery) -> None:
+    current_admin = await _guard(callback)
+    if current_admin is None:
+        return
+    period = callback.data.split(":", 1)[1]
+    text = await _build_vstats_text(current_admin, period)
+    await _edit(callback, text, _vstats_keyboard())
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
+# TZ v2 6-bo'lim (B-3) — tekshiruv dvigateli boshqaruvi
+# --------------------------------------------------------------------------- #
+
+_CHECK_CATEGORY_LABELS = {
+    CheckCategory.CHECK_PASSED: "✅ O'TDI",
+    CheckCategory.CHECK_FAILED: "❌ O'TMADI",
+    CheckCategory.CHECK_ERROR: "⚠️ XATO",
+}
+
+
+def _parse_check_category(raw: str) -> CheckCategory | None:
+    normalized = raw.strip().upper()
+    aliases = {
+        "PASSED": CheckCategory.CHECK_PASSED,
+        "CHECK_PASSED": CheckCategory.CHECK_PASSED,
+        "OTDI": CheckCategory.CHECK_PASSED,
+        "FAILED": CheckCategory.CHECK_FAILED,
+        "CHECK_FAILED": CheckCategory.CHECK_FAILED,
+        "OTMADI": CheckCategory.CHECK_FAILED,
+        "ERROR": CheckCategory.CHECK_ERROR,
+        "CHECK_ERROR": CheckCategory.CHECK_ERROR,
+        "XATO": CheckCategory.CHECK_ERROR,
+    }
+    return aliases.get(normalized)
+
+
+@admin_router.message(Command("setchecker"))
+async def cmd_setchecker(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """TZ v2 6.3 — tekshiruvchi lichkani belgilash (username yoki raqamli id)."""
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop tekshiruvchini belgilay oladi.")
+        return
+    if not command.args:
+        async with get_session() as session:
+            current = await get_checker_account(session)
+        await message.answer(
+            f"Joriy tekshiruvchi: <code>{current or 'belgilanmagan'}</code>\n\n"
+            f"Belgilash: <code>/setchecker &lt;username yoki id&gt;</code>\n\n"
+            f"⚠️ Tekshiruvchi har bir admin akkauntidan xabar qabul qila "
+            f"olishi kerak (kontaktga qo'shsin)."
+        )
+        return
+    value = command.args.strip()
+    async with get_session() as session:
+        await set_checker_account(session, value)
+        await log_action(session, message.from_user.id, "set_checker", value)
+    await message.answer(f"✅ Tekshiruvchi belgilandi: <code>{value}</code>")
+
+
+@admin_router.message(Command("checkpatterns"))
+async def cmd_checkpatterns(message: Message) -> None:
+    """TZ v2 6.4 — tanish shablonlari ro'yxati (uch kategoriya)."""
+    async with get_session() as session:
+        patterns = await get_all_patterns(session)
+    blocks = []
+    for category in CheckCategory:
+        items = patterns[category]
+        body = (
+            "\n".join(f"  {i}. <code>{p}</code>" for i, p in enumerate(items, 1))
+            if items
+            else "  ❌ kiritilmagan"
+        )
+        blocks.append(f"<b>{_CHECK_CATEGORY_LABELS[category]}</b> ({category.value})\n{body}")
+    await message.answer(
+        "🔎 <b>Tekshiruvchi javobini tanish shablonlari</b>\n\n"
+        + "\n\n".join(blocks)
+        + "\n\nQo'shish: <code>/addcheckpattern OTDI bor</code>\n"
+        "O'chirish: <code>/delcheckpattern OTDI 1</code>\n"
+        "Sinash: <code>/testcheck bazada bor emas</code>\n"
+        "Formatlar: oddiy so'z · <code>~ichida</code> · <code>=aynan</code> · "
+        "<code>re:regex</code>"
+    )
+
+
+@admin_router.message(Command("addcheckpattern"))
+async def cmd_addcheckpattern(message: Message, command: CommandObject) -> None:
+    parts = (command.args or "").split(maxsplit=1)
+    category = _parse_check_category(parts[0]) if parts else None
+    if category is None or len(parts) < 2:
+        await message.answer(
+            "Format: <code>/addcheckpattern &lt;OTDI|OTMADI|XATO&gt; &lt;shablon&gt;</code>"
+        )
+        return
+    async with get_session() as session:
+        try:
+            await add_pattern(session, category, parts[1])
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await log_action(
+            session, message.from_user.id, "add_check_pattern",
+            f"{category.value}: {parts[1]}",
+        )
+    await message.answer(
+        f"✅ {_CHECK_CATEGORY_LABELS[category]} ro'yxatiga qo'shildi: "
+        f"<code>{parts[1]}</code>"
+    )
+
+
+@admin_router.message(Command("delcheckpattern"))
+async def cmd_delcheckpattern(message: Message, command: CommandObject) -> None:
+    parts = (command.args or "").split()
+    category = _parse_check_category(parts[0]) if parts else None
+    if category is None or len(parts) != 2 or not parts[1].isdigit():
+        await message.answer(
+            "Format: <code>/delcheckpattern &lt;OTDI|OTMADI|XATO&gt; &lt;raqam&gt;</code> "
+            "(raqamni /checkpatterns ro'yxatidan oling)"
+        )
+        return
+    async with get_session() as session:
+        removed = await remove_pattern(session, category, int(parts[1]))
+        if removed is None:
+            await message.answer("Bunday raqamli shablon topilmadi.")
+            return
+        await log_action(
+            session, message.from_user.id, "del_check_pattern",
+            f"{category.value}: {removed}",
+        )
+    await message.answer(f"🗑 O'chirildi: <code>{removed}</code>")
+
+
+@admin_router.message(Command("testcheck"))
+async def cmd_testcheck(message: Message, command: CommandObject) -> None:
+    """TZ v2 6.4.6 — sinov: berilgan matn qanday tanib olinishini ko'rsatadi.
+    Jonli ishga tushirishdan oldin haqiqiy javoblarni shu yerda tekshiring."""
+    if not command.args:
+        await message.answer("Format: <code>/testcheck &lt;javob matni&gt;</code>")
+        return
+    async with get_session() as session:
+        patterns = await get_all_patterns(session)
+    try:
+        category = classify(command.args, patterns)
+    except AmbiguousMatch:
+        await message.answer(
+            "⚠️ <b>QARAMA-QARSHI</b> — matn ham O'TDI, ham O'TMADI shabloniga "
+            "alohida joylarda mos keldi. Jonli rejimda bu NEEDS_ADMIN bo'ladi."
+        )
+        return
+    if category is None:
+        await message.answer(
+            "❓ <b>Tanilmadi</b> — hech qaysi shablonga mos emas. Jonli rejimda "
+            "tizim keyingi xabarni kutadi (stall taymerigacha)."
+        )
+        return
+    await message.answer(
+        f"{_CHECK_CATEGORY_LABELS[category]} deb tanildi ({category.value})."
+    )
+
+
+@admin_router.message(Command("shadow"))
+async def cmd_shadow(message: Message, current_admin: Admin) -> None:
+    """TZ v2 6.4.6 — soya rejimi almashtirgichi (standart: YOQILGAN)."""
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop soya rejimini almashtira oladi.")
+        return
+    async with get_session() as session:
+        new_value = not await is_shadow_mode(session)
+        await set_shadow_mode(session, new_value)
+        await log_action(
+            session, message.from_user.id, "shadow_mode", "on" if new_value else "off"
+        )
+    if new_value:
+        await message.answer(
+            "🕶 Soya rejimi <b>YOQILDI</b> — tizim taniydi, bazaga yozadi, "
+            "lekin mijozga HECH NARSA yozmaydi."
+        )
+    else:
+        await message.answer(
+            "🟢 Soya rejimi <b>O'CHIRILDI</b> — natijalar endi mijozlarga "
+            "yetkaziladi (B-4 oqimi bo'yicha)."
+        )
+
+
+@admin_router.message(Command("unrecognized"))
+async def cmd_unrecognized(message: Message) -> None:
+    """TZ v2 6.4.6 — tanilmagan javoblar jurnali. Tugma bosilsa o'sha matn
+    shablonga avtomatik qo'shiladi — shablonlar haqiqiy trafikdan o'sadi."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(CheckRequest)
+            .where(
+                CheckRequest.raw_reply != "",
+                (CheckRequest.result == CheckResult.UNRECOGNIZED)
+                | (CheckRequest.replied_at.is_(None) & CheckRequest.sent_at.is_not(None)),
+            )
+            .order_by(CheckRequest.id.desc())
+            .limit(10)
+        )
+        requests = result.scalars().all()
+    if not requests:
+        await message.answer("Tanilmagan javoblar yo'q. 👍")
+        return
+    for req in requests:
+        last_line = req.raw_reply.strip().splitlines()[-1][:200]
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ O'TDI", callback_data=f"ucp:{req.id}:PASSED"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ O'TMADI", callback_data=f"ucp:{req.id}:FAILED"
+                    ),
+                    InlineKeyboardButton(
+                        text="⚠️ XATO", callback_data=f"ucp:{req.id}:ERROR"
+                    ),
+                ]
+            ]
+        )
+        await message.answer(
+            f"❓ So'rov #{req.id} · {req.phone}\n"
+            f"Javob: <code>{last_line}</code>\n\n"
+            f"Bu javob qaysi ma'noda? (bosilsa shablonga qo'shiladi)",
+            reply_markup=markup,
+        )
+
+
+@admin_router.callback_query(F.data.startswith("vres:"))
+async def cb_failed_result(callback: CallbackQuery) -> None:
+    """TZ v2 7.1 — FAILED natija tasdiqlash tugmalari.
+
+    Adminbot Telethon'ga ega emas — [Mijozga yuborish] bosilganda
+    `scheduled_jobs`ga NOTIFY_FAILED ishi yoziladi, uni Teleton polleri
+    30 soniya ichida olib, mijozga o'sha adminning akkauntidan yozadi
+    (v1 dagi bayroq naqshining scheduled_jobs varianti).
+    """
+    if await _guard(callback) is None:
+        return
+    _, raw_id, action = callback.data.split(":")
+    request_id = int(raw_id)
+
+    async with get_session() as session:
+        req = await session.get(CheckRequest, request_id)
+        if req is None:
+            await callback.answer("So'rov topilmadi.", show_alert=True)
+            return
+        if req.customer_notified_at is not None:
+            await _edit(callback, "Bu natija mijozga allaqachon yuborilgan.")
+            await callback.answer()
+            return
+
+        if action == "send":
+            session.add(
+                ScheduledJob(
+                    kind=JobKind.NOTIFY_FAILED,
+                    case_id=req.case_id,
+                    due_at=datetime.datetime.utcnow(),
+                    payload=json.dumps({"request_id": request_id}),
+                )
+            )
+            await log_action(
+                session,
+                callback.from_user.id,
+                "confirm_failed_notify",
+                f"request #{request_id}",
+            )
+            await session.commit()
+            await _edit(
+                callback,
+                "📤 Yuborish tasdiqlandi — mijozga 1 daqiqa ichida "
+                "\"o'tmadi\" xabari boradi (admin akkauntidan).",
+            )
+        else:
+            await log_action(
+                session,
+                callback.from_user.id,
+                "skip_failed_notify",
+                f"request #{request_id}",
+            )
+            await session.commit()
+            await _edit(
+                callback,
+                "✋ Yuborilmadi — mijoz bilan o'zingiz gaplashasiz "
+                "(natija bazada saqlangan).",
+            )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("ucp:"))
+async def cb_unrecognized_classify(callback: CallbackQuery) -> None:
+    if await _guard(callback) is None:
+        return
+    _, raw_id, raw_cat = callback.data.split(":")
+    category = _parse_check_category(raw_cat)
+    async with get_session() as session:
+        req = await session.get(CheckRequest, int(raw_id))
+        if req is None or category is None or not req.raw_reply.strip():
+            await callback.answer("So'rov topilmadi.", show_alert=True)
+            return
+        last_line = req.raw_reply.strip().splitlines()[-1]
+        # Aynan-tenglik shabloni sifatida qo'shiladi (eng xavfsiz variant —
+        # keng qamrovli so'z emas, aynan shu javob matni).
+        await add_pattern(session, category, f"={last_line}")
+        await log_action(
+            session,
+            callback.from_user.id,
+            "classify_unrecognized",
+            f"req #{req.id} -> {category.value}",
+        )
+    await _edit(
+        callback,
+        f"✅ Shablon qo'shildi: <code>={last_line[:100]}</code> → "
+        f"{_CHECK_CATEGORY_LABELS[category]}",
+    )
+    await callback.answer("Shablon qo'shildi.")
 
 
 # --------------------------------------------------------------------------- #

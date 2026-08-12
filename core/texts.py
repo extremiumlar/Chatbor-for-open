@@ -21,3 +21,15 @@ DUPLICATE_ACTIVE = (
 ALREADY_CONFIRMED = "Bu nomer allaqachon tasdiqlangan."
 # TZ 2.1 (Q58) — qayta yuborilgan kupon avvalgisi bilan bir xil bo'lsa
 DUPLICATE_COUPON = "Bu eskisi bilan bir xil kupon. Boshqa kupon raqamini yuboring."
+
+# TZ v2 5.3 — admin rasm tashlagach mijozga avtomatik tushadigan matn.
+SCREENSHOT_FOLLOWUP = (
+    "Kuponingiz tekshirish jarayonida. Iltimos, 1.5 soatdan keyin eslating."
+)
+
+# TZ v2 7.2 — tekshiruv natijasi mijozga (aralash rejim, §7.1).
+RESULT_PASSED = "Tabriklaymiz! Ovozingiz muvaffaqiyatli qabul qilingan. ✅"
+RESULT_FAILED = (
+    "Afsuski, ovozingiz tizimda ko'rinmadi. Iltimos, qaytadan urinib "
+    "ko'ring yoki menga yozing."
+)

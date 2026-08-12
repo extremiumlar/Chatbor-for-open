@@ -49,7 +49,19 @@ HELP_TEXT = (
     "🔍 <b>Nomer qidirish</b> — nomer bo'yicha butun tarix.\n"
     "⚙️ <b>Sozlamalar</b> — bildirishnoma rejimi, audit, tizim holati.\n\n"
     "<i>Eski buyruqlar ham ishlaydi:</i> /bots, /stats, /problems, /pending, "
-    "/templates, /audit, <code>drop find &lt;nomer&gt;</code> va boshqalar."
+    "/templates, /audit, <code>drop find &lt;nomer&gt;</code> va boshqalar.\n\n"
+    "🆕 <b>v2 (qo'lda oqim):</b>\n"
+    "/setgroup — nazorat guruhini belgilash (guruh ichida yozing yoki "
+    "<code>/setgroup &lt;chat_id&gt;</code>)\n"
+    "/setchecker — tekshiruvchi lichkani belgilash\n"
+    "/checkpatterns, /addcheckpattern, /delcheckpattern — javob tanish "
+    "shablonlari\n"
+    "/testcheck &lt;matn&gt; — javob qanday tanilishini sinash\n"
+    "/unrecognized — tanilmagan javoblar jurnali (tugma bilan shablonga "
+    "qo'shish)\n"
+    "/shadow — soya rejimi (standart: yoqilgan — mijozga hech narsa yozilmaydi)\n"
+    "/vstats — v2 statistika (Bugun/Hafta/Oy; oddiy admin faqat o'zinikini "
+    "ko'radi). Kunlik hisobot 21:00 da guruhga avtomatik tushadi."
 )
 
 

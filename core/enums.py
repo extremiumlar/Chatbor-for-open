@@ -1,23 +1,42 @@
-"""Case statuslar — TZ 6-bo'lim. Bu ro'yxatdan tashqari status qo'shilmaydi."""
+"""Case statuslar.
+
+v1 (TZ_Data_Relay_System.md 6-bo'lim) — avtomatik bot-pool oqimi statuslari.
+Eski ma'lumotlar bazada shu qiymatlar bilan turadi, shuning uchun ro'yxatdan
+o'chirilmaydi (v2 da bu oqim ulanmagan — TZ v2 12-bo'lim).
+
+v2 (TZ_v2_Qolda_Admin_Oqimi.md 9.3) — qo'lda admin oqimi statuslari.
+v1'dagi "yangi status qo'shilmaydi" cheklovi v2 TZ bilan bekor qilingan.
+"""
 
 import enum
 
 
 class CaseStatus(str, enum.Enum):
+    # --- umumiy (v1 va v2 ikkalasida ishlatiladi) ---
     NUMBER_RECEIVED = "NUMBER_RECEIVED"
+    SUSPICIOUS_HOLD = "SUSPICIOUS_HOLD"
+    NEEDS_ADMIN = "NEEDS_ADMIN"
+
+    # --- faqat v1 (eski avtomatik oqim; yangi kod ishlatmaydi) ---
     SENT_TO_BOT = "SENT_TO_BOT"
     AWAITING_COUPON = "AWAITING_COUPON"
     COUPON_SENT_TO_BOT = "COUPON_SENT_TO_BOT"
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
-    SUSPICIOUS_HOLD = "SUSPICIOUS_HOLD"
-    NEEDS_ADMIN = "NEEDS_ADMIN"
     TIMEOUT = "TIMEOUT"
     CUSTOMER_TIMEOUT = "CUSTOMER_TIMEOUT"
     EXPIRED_SESSION = "EXPIRED_SESSION"
     DUPLICATE_ACTIVE = "DUPLICATE_ACTIVE"
     ALREADY_CONFIRMED = "ALREADY_CONFIRMED"
+
+    # --- v2 — qo'lda admin oqimi (TZ v2 9.3) ---
+    SCREENSHOTS_SENT = "SCREENSHOTS_SENT"  # admin rasm tashladi, taymer ishlayapti
+    CHECK_QUEUED = "CHECK_QUEUED"  # tekshiruv navbatda (drip kutilmoqda)
+    CHECK_SENT = "CHECK_SENT"  # so'rov tekshiruvchi lichkaga yuborildi
+    PASSED = "PASSED"  # ovoz o'tgan (yakuniy)
+    FAILED = "FAILED"  # ovoz o'tmagan (yakuniy, /check bilan qayta ochilishi mumkin)
+    CHECK_STALLED = "CHECK_STALLED"  # tekshiruvchi javob bermayapti
 
 
 # Case bu holatlardan birida bo'lsa "faol" (bot bilan jarayon davom etmoqda)
@@ -72,6 +91,31 @@ MANUAL_RESOLVABLE_STATUSES = frozenset(
         CaseStatus.CUSTOMER_TIMEOUT,
     }
 )
+
+# --------------------------------------------------------------------------- #
+# v2 — qo'lda admin oqimi to'plamlari (TZ v2)
+# --------------------------------------------------------------------------- #
+
+# Case "ochiq" — jarayon hali yakunlanmagan. §5.1 (faol case sharti): admin
+# tashlagan rasm faqat shu holatlardagi case'ga partiya sifatida olinadi;
+# boshqa holatda rasm oddiy suhbat hisoblanadi. Yangi nomer kelganda ham shu
+# ro'yxat "mavjud ochiq case bormi" tekshiruviga xizmat qiladi.
+V2_OPEN_STATUSES = frozenset(
+    {
+        CaseStatus.NUMBER_RECEIVED,
+        CaseStatus.SCREENSHOTS_SENT,
+        CaseStatus.CHECK_QUEUED,
+        CaseStatus.CHECK_SENT,
+        CaseStatus.CHECK_STALLED,
+        CaseStatus.NEEDS_ADMIN,
+        CaseStatus.SUSPICIOUS_HOLD,
+    }
+)
+
+# v2 yakuniy holatlar. PASSED — abadiy (§6.1 a4: mavsum tushunchasi yo'q);
+# FAILED — yakuniy, lekin admin /check bilan qayta tekshirishi mumkin.
+V2_FINAL_STATUSES = frozenset({CaseStatus.PASSED, CaseStatus.FAILED})
+
 
 # Audit O-2 — "muammoli holatlar" (TZ 10-bo'lim). Avval adminbot_service/bot.py
 # (⚠️ Muammolar ro'yxati) va core/logic/stats.py (📊 Statistikadagi

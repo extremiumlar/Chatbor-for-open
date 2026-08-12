@@ -21,6 +21,11 @@ DEFAULTS: dict[str, str] = {
     "DUPLICATE_ACTIVE": texts.DUPLICATE_ACTIVE,
     "ALREADY_CONFIRMED": texts.ALREADY_CONFIRMED,
     "DUPLICATE_COUPON": texts.DUPLICATE_COUPON,
+    # TZ v2 5.3 — rasm partiyasidan keyin mijozga tushadigan matn.
+    "SCREENSHOT_FOLLOWUP": texts.SCREENSHOT_FOLLOWUP,
+    # TZ v2 7.2 — natija matnlari (aralash rejim).
+    "RESULT_PASSED": texts.RESULT_PASSED,
+    "RESULT_FAILED": texts.RESULT_FAILED,
 }
 
 

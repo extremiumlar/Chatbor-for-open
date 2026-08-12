@@ -1,6 +1,8 @@
 .env
 *.session
 *.session-journal
+sessions/
+_pending_login*
 __pycache__/
 *.db
 *.db.*.bak

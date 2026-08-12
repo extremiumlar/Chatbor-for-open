@@ -1,0 +1,28 @@
+# TZ v2 13.3 — Teleton v2 (qo'lda admin oqimi) systemd xizmati.
+#
+# O'rnatish (VDS'da, root sifatida):
+#   cp deploy/*.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now teleton-v2 adminbot
+#
+# Loglar: journalctl -u teleton-v2 -f   (qo'shimcha: LOG_DIR faylllari)
+
+[Unit]
+Description=Teleton v2 - kupon tekshirish (qo'lda admin oqimi)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Xizmat foydalanuvchisi — sessiya fayllari FAQAT shu foydalanuvchiga ochiq
+# bo'lishi kerak (TZ v2 13.4): chown -R teleton:teleton /opt/chatbot2
+User=teleton
+Group=teleton
+WorkingDirectory=/opt/chatbot2
+ExecStart=/opt/chatbot2/venv/bin/python -m teleton_service.manual_relay
+Restart=always
+RestartSec=5
+# .env fayli WorkingDirectory'da (python-dotenv o'qiydi).
+
+[Install]
+WantedBy=multi-user.target

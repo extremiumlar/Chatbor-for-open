@@ -1,0 +1,18 @@
+# TZ v2 13.3 — Adminbot systemd xizmati.
+
+[Unit]
+Description=Adminbot - boshqaruv paneli (aiogram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=teleton
+Group=teleton
+WorkingDirectory=/opt/chatbot2
+ExecStart=/opt/chatbot2/venv/bin/python -m adminbot_service.bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

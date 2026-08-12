@@ -1,0 +1,18 @@
+# TZ v2 13.3 — Web panel (ixtiyoriy; bu bosqichda kengaytirilmagan).
+
+[Unit]
+Description=Web panel (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=teleton
+Group=teleton
+WorkingDirectory=/opt/chatbot2
+ExecStart=/opt/chatbot2/venv/bin/uvicorn panel_service.app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

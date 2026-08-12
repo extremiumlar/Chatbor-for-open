@@ -61,6 +61,14 @@ class Admin(Base):
         SqlEnum(AdminRole, native_enum=False, length=16), default=AdminRole.ADMIN
     )
 
+    # TZ v2 4.2b — admin "nofaol" deb belgilansa uning ochiq case'lari
+    # muzlatiladi va Telethon klienti ishga tushirilmaydi.
+    is_active: Mapped[bool] = mapped_column(default=True)
+
+    # TZ v2 8.4 — superadmindan tashqari "hammani ko'rish" huquqi berilgan
+    # kuzatuvchi adminlar (oddiy admin faqat o'z statistikasini ko'radi).
+    can_view_all_stats: Mapped[bool] = mapped_column(default=False)
+
 
 class User(Base):
     """Mijoz — TZ 11.1."""
@@ -157,6 +165,20 @@ class Case(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+    # ------------------------------------------------------------------ #
+    # TZ v2 — qo'lda admin oqimi maydonlari
+    # ------------------------------------------------------------------ #
+
+    # TZ v2 9.2 — guruh caption va qidiruv uchun qisqa kod ("C1247").
+    # id ma'lum bo'lgach (birinchi flush'dan keyin) manual_case to'ldiradi.
+    short_code: Mapped[str | None] = mapped_column(String(16), nullable=True, unique=True)
+
+    # TZ v2 9.2 — kupon TEKSHIRUVGA ISHLATILMAYDI, lekin saqlanadi:
+    # (1) mijoz holati signali — kupon bor = ovoz bergan (rasmsizlik
+    # eslatmasining 2 xil matni shunga qaraydi, §6.1 a2), (2) dalil.
+    coupon: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    coupon_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="cases")
     attempts: Mapped[list["CouponAttempt"]] = relationship(back_populates="case")
@@ -281,4 +303,184 @@ class AuditLog(Base):
     admin_tg_id: Mapped[int] = mapped_column(Integer)
     action: Mapped[str] = mapped_column(String(64))
     details: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# =========================================================================== #
+# TZ v2 (TZ_v2_Qolda_Admin_Oqimi.md) — qo'lda admin oqimi jadvallari (9.1)
+# =========================================================================== #
+
+
+class SessionStatus(str, enum.Enum):
+    """TZ v2 4.3 — har admin akkauntidagi Telethon sessiyasi holati."""
+
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    AUTH_LOST = "AUTH_LOST"  # sessiya bekor qilingan — qayta login shart
+
+
+class AdminSession(Base):
+    """Bitta adminning Telethon sessiyasi — TZ v2 4.2 (bitta jarayon, N klient).
+
+    `.session` faylning O'ZI bazada saqlanmaydi (TZ v2 13.4 — u fayl tizimida
+    qattiq huquq bilan turadi, backupga ham kirmaydi); bu jadval faqat
+    ro'yxat + salomatlik holati.
+    """
+
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id"), unique=True)
+    # sessions/ papkadagi fayl nomi (".session"siz), masalan "admin_3".
+    session_name: Mapped[str] = mapped_column(String(255), unique=True)
+    phone: Mapped[str] = mapped_column(String(32))
+    status: Mapped[SessionStatus] = mapped_column(
+        SqlEnum(SessionStatus, native_enum=False, length=16),
+        default=SessionStatus.DISCONNECTED,
+    )
+    last_seen_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class BatchOutcome(str, enum.Enum):
+    """TZ v2 9.1 — rasm partiyasining yakuniy natijasi (guruhdagi reaksiya)."""
+
+    PENDING = "PENDING"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"  # javob tanilmadi (⚠️)
+    STALLED = "STALLED"  # tekshiruvchi javob bermadi (⏳)
+
+
+class OutcomeSource(str, enum.Enum):
+    """Natija qayerdan kelgani: tizim avtomatik qo'ydimi yoki odam qo'lda
+    reaksiyani o'zgartirdimi (TZ v2 7.3 — override statistikada alohida)."""
+
+    AUTO = "AUTO"
+    MANUAL = "MANUAL"
+
+
+class ScreenshotBatch(Base):
+    """Admin mijozga tashlagan 1-3 rasmlik partiya — TZ v2 5-bo'lim."""
+
+    __tablename__ = "screenshot_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id"))
+    phone: Mapped[str] = mapped_column(String(32))
+    image_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Telethon media identifikatorlari JSON ro'yxat sifatida — forward
+    # qayta yuklamasdan ishlashi uchun (TZ v2 5.2).
+    file_ids: Mapped[str] = mapped_column(Text, default="[]")
+    group_chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    group_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TZ v2 5.4 — bitta nomerga ikkinchi partiya (dublikat) belgisi:
+    # statistikada ikki marta hisoblanmaydi, superadminga alert ketadi.
+    is_duplicate: Mapped[bool] = mapped_column(default=False)
+    duplicate_of_batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("screenshot_batches.id"), nullable=True
+    )
+    sent_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    outcome: Mapped[BatchOutcome] = mapped_column(
+        SqlEnum(BatchOutcome, native_enum=False, length=16), default=BatchOutcome.PENDING
+    )
+    outcome_source: Mapped[OutcomeSource] = mapped_column(
+        SqlEnum(OutcomeSource, native_enum=False, length=16), default=OutcomeSource.AUTO
+    )
+    # Odam guruhda reaksiyani qo'lda o'zgartirgan bo'lsa — kim va qachon.
+    reacted_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reacted_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class CheckTrigger(str, enum.Enum):
+    """TZ v2 6.1 — tekshiruv qanday boshlangani."""
+
+    MANUAL = "MANUAL"  # admin /check bilan
+    AUTO = "AUTO"  # 1.5 soatlik taymer
+
+
+class CheckResult(str, enum.Enum):
+    """TZ v2 9.1 — tekshiruvchi lichka javobining tanilgan natijasi."""
+
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    UNRECOGNIZED = "UNRECOGNIZED"  # shablonlarga mos kelmadi -> NEEDS_ADMIN
+    NO_REPLY = "NO_REPLY"  # stall muddati o'tdi (so'rov hamon ochiq)
+
+
+class NotifiedBy(str, enum.Enum):
+    """TZ v2 7.1 — natija mijozga qanday yetkazilgani (aralash rejim)."""
+
+    AUTO = "AUTO"  # PASSED — tizim avtomatik yozdi
+    ADMIN = "ADMIN"  # FAILED — admin tugma bosib tasdiqladi
+
+
+class CheckRequest(Base):
+    """Tekshiruvchi lichkaga yuborilgan bitta so'rov — TZ v2 6-bo'lim."""
+
+    __tablename__ = "check_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"))
+    phone: Mapped[str] = mapped_column(String(32))
+    # So'rov qaysi adminning akkauntidan ketadi (statistika ham shundan).
+    requested_by_admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id"))
+    trigger: Mapped[CheckTrigger] = mapped_column(
+        SqlEnum(CheckTrigger, native_enum=False, length=16)
+    )
+    # TZ v2 6.1 a4 — FAILED'dan keyin admin /check bilan qayta tekshirsa.
+    is_recheck: Mapped[bool] = mapped_column(default=False)
+    queued_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
+    sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Tekshiruvchiga yuborilgan xabarimizning Telegram id'si — tekshiruvchi
+    # REPLY qilib javob bersa, so'rovga aniq bog'lash uchun (TZ v2 6.4.5,
+    # 1-ustuvorlik).
+    sent_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replied_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    result: Mapped[CheckResult | None] = mapped_column(
+        SqlEnum(CheckResult, native_enum=False, length=16), nullable=True
+    )
+    raw_reply: Mapped[str] = mapped_column(Text, default="")
+    # TZ v2 6.5 (kech javob) — case yopilgandan keyin kelgan javob natijani
+    # avtomatik to'g'irlagan bo'lsa (statistikada alohida ko'rinadi).
+    late_corrected: Mapped[bool] = mapped_column(default=False)
+    customer_notified_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    notified_by: Mapped[NotifiedBy | None] = mapped_column(
+        SqlEnum(NotifiedBy, native_enum=False, length=16), nullable=True
+    )
+
+
+class JobKind(str, enum.Enum):
+    """TZ v2 9.1/9.4 — bazada saqlanadigan rejalashtirilgan ish turlari.
+
+    Taymerlar XOTIRADA EMAS (v1 `_customer_timers`dan farqli) — 1.5 soatlik
+    kutishlar restart'dan omon qolishi shart.
+    """
+
+    CHECK_DUE = "CHECK_DUE"  # rasm vaqti + 90daq -> tekshiruvni boshlash
+    REMIND_NO_SCREENSHOT = "REMIND_NO_SCREENSHOT"  # rasm tashlanmagan eslatmasi
+    STALLED_ALERT = "STALLED_ALERT"  # tekshiruvchi javobsiz — superadmin alert
+    DAILY_REPORT = "DAILY_REPORT"  # 21:00 kunlik hisobot
+    # TZ v2 7.1 — FAILED natijani admin adminbotda tasdiqladi: mijozga
+    # yuborishni Teleton bajaradi (adminbot Telethon'ga ega emas — bayroq
+    # naqshi, faqat endi scheduled_jobs orqali).
+    NOTIFY_FAILED = "NOTIFY_FAILED"
+
+
+class ScheduledJob(Base):
+    """Muddati kelganda poller bajaradigan ish — TZ v2 9.4."""
+
+    __tablename__ = "scheduled_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[JobKind] = mapped_column(SqlEnum(JobKind, native_enum=False, length=32))
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True)
+    due_at: Mapped[datetime.datetime] = mapped_column(DateTime, index=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    done_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime, server_default=func.now())
