@@ -167,6 +167,24 @@ class ManualCaseManager:
             status=CaseStatus.NUMBER_RECEIVED,
             assigned_admin_id=admin_id,
         )
+        # Audit BUG-2 — FAILED'dan keyin qayta yuborilgan nomer YANGI sikl
+        # ochadi (§6.1 a4), lekin kupon eski case'da qolib ketardi. Kupon
+        # "mijoz ovoz bergan" signali (§9.2) — usiz rasmsizlik eslatmasi
+        # noto'g'ri variantda chiqadi. Shu user + shu nomer bo'yicha oxirgi
+        # kuponli case'dan ko'chiriladi.
+        prev = await session.execute(
+            select(Case)
+            .where(
+                Case.user_id == user.id,
+                Case.phone == phone,
+                Case.coupon.is_not(None),
+            )
+            .order_by(Case.id.desc())
+        )
+        prev_case = prev.scalars().first()
+        if prev_case is not None:
+            case.coupon = prev_case.coupon
+            case.coupon_at = prev_case.coupon_at
         session.add(case)
         await session.commit()
         await session.refresh(case)

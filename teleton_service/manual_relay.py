@@ -382,6 +382,13 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                 outcome = await case_manager.handle_phone_detected(
                     admin.id, tg_user_id, tg_username, display_name, phone
                 )
+                # Audit BUG-1 — mijoz nomer va kuponni BITTA xabarda yuborishi
+                # odatiy hol ("901234567 kuponim 123456"). Avval bu yerda
+                # return bo'lib kupon yo'qolardi. Kupon regexi 6-lik uzilmagan
+                # raqam talab qiladi — nomer ichidan yolg'on kupon olinmaydi.
+                coupon = extract_coupon(text)
+                if coupon is not None:
+                    await case_manager.handle_coupon_detected(tg_user_id, coupon)
                 if outcome.customer_text:
                     # Faqat ALREADY_CONFIRMED holati — boshqa hamma narsada
                     # tizim jim, admin tabiiy suhbatda o'zi yozadi.

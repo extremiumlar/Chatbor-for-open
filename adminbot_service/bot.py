@@ -1735,7 +1735,14 @@ async def cmd_checkpatterns(message: Message) -> None:
 
 
 @admin_router.message(Command("addcheckpattern"))
-async def cmd_addcheckpattern(message: Message, command: CommandObject) -> None:
+async def cmd_addcheckpattern(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    # Audit — TZ v2 §10: sozlash huquqi superadminda. Shablonlar mijozga
+    # ketadigan natijani belgilaydi — oddiy admin o'zgartira olmasligi kerak.
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop shablon qo'sha oladi.")
+        return
     parts = (command.args or "").split(maxsplit=1)
     category = _parse_check_category(parts[0]) if parts else None
     if category is None or len(parts) < 2:
@@ -1760,7 +1767,12 @@ async def cmd_addcheckpattern(message: Message, command: CommandObject) -> None:
 
 
 @admin_router.message(Command("delcheckpattern"))
-async def cmd_delcheckpattern(message: Message, command: CommandObject) -> None:
+async def cmd_delcheckpattern(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop shablon o'chira oladi.")
+        return
     parts = (command.args or "").split()
     category = _parse_check_category(parts[0]) if parts else None
     if category is None or len(parts) != 2 or not parts[1].isdigit():
@@ -1940,7 +1952,14 @@ async def cb_failed_result(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.startswith("ucp:"))
 async def cb_unrecognized_classify(callback: CallbackQuery) -> None:
-    if await _guard(callback) is None:
+    current_admin = await _guard(callback)
+    if current_admin is None:
+        return
+    # Audit — tugma ham shablonga yozadi: superadmin huquqi (TZ v2 §10).
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await callback.answer(
+            "Faqat Owner/Rop shablon qo'sha oladi.", show_alert=True
+        )
         return
     _, raw_id, raw_cat = callback.data.split(":")
     category = _parse_check_category(raw_cat)
