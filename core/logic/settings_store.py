@@ -190,6 +190,17 @@ async def get_daily_report_time(session: AsyncSession) -> str:
     return await get_setting(session, DAILY_REPORT_TIME_KEY, "21:00")
 
 
+async def set_daily_report_time(session: AsyncSession, value: str) -> None:
+    """Adminbot /setreporttime — HH:MM formatini tekshirib saqlaydi."""
+    parts = value.strip().split(":")
+    if len(parts) != 2:
+        raise ValueError("Format: HH:MM (masalan 21:00)")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("Soat 00-23, daqiqa 00-59 oralig'ida bo'lishi kerak.")
+    await set_setting(session, DAILY_REPORT_TIME_KEY, f"{hour:02d}:{minute:02d}")
+
+
 async def get_check_request_template(session: AsyncSession) -> str:
     """Tekshiruvchiga yuboriladigan xabar shakli. `{phone}` o'rniga kanonik
     nomer qo'yiladi. Format masalasi keyinga qoldirilgan (TZ 15.1) —

@@ -140,7 +140,7 @@ async def test_drip_sends_one_and_marks_sent(session_factory):
 
     sent = await engine.drip_tick()
 
-    assert sent is True
+    assert sent == 1
     assert sender.sent == [(ADMIN_ID, f"+{PHONE}")]
     async with session_factory() as session:
         req = (await session.execute(select(CheckRequest))).scalars().first()
@@ -163,8 +163,10 @@ async def test_drip_sends_one_and_marks_sent(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_drip_respects_one_open_per_admin(session_factory):
-    """6.3 — bitta admin chatida bir vaqtda faqat bitta ochiq so'rov."""
+async def test_drip_flushes_all_queued_at_once(session_factory):
+    """Foydalanuvchi qarori (2026-08-13): tezlik cheklovi YO'Q — navbatdagi
+    barcha so'rovlar bitta tick'da ketadi (tekshiruvchi istalgancha qabul
+    qiladi)."""
     await _seed_ready(session_factory)
     case1 = await _open_case_with_screenshots(session_factory)
     case2 = await _open_case_with_screenshots(
@@ -175,14 +177,19 @@ async def test_drip_respects_one_open_per_admin(session_factory):
     await engine.request_check(case1.id, CheckTrigger.AUTO)
     await engine.request_check(case2.id, CheckTrigger.AUTO)
 
-    assert await engine.drip_tick() is True
-    assert await engine.drip_tick() is False  # admin band — ikkinchisi kutadi
-    assert len(sender.sent) == 1
-
-    # Birinchisiga javob kelgach ikkinchisi ketadi.
-    await engine.handle_checker_reply(ADMIN_ID, "bor")
-    assert await engine.drip_tick() is True
+    assert await engine.drip_tick() == 2  # ikkalasi birdan
+    assert await engine.drip_tick() == 0  # navbat bo'sh
     assert len(sender.sent) == 2
+
+    # Ko'p ochiq so'rovda oddiy "bor" ENG ESKISIGA bog'lanadi (FIFO).
+    await engine.handle_checker_reply(ADMIN_ID, "bor")
+    async with session_factory() as session:
+        req1 = (
+            (await session.execute(select(CheckRequest).order_by(CheckRequest.id)))
+            .scalars()
+            .first()
+        )
+    assert req1.result == CheckResult.PASSED
 
 
 @pytest.mark.asyncio
@@ -203,8 +210,8 @@ async def test_drip_not_ready_without_checker(session_factory):
     engine = _make_engine(session_factory, alert=capture)
     await engine.request_check(case.id, CheckTrigger.AUTO)
 
-    assert await engine.drip_tick() is False
-    assert await engine.drip_tick() is False
+    assert await engine.drip_tick() == 0
+    assert await engine.drip_tick() == 0
     # Alert faqat bir marta (spam yo'q).
     assert len([a for a in alerts if "ishga tushmadi" in a]) == 1
 
@@ -574,7 +581,7 @@ async def test_drip_skips_inactive_admin(session_factory):
         admin.is_active = False
         await session.commit()
 
-    assert await engine.drip_tick() is False
+    assert await engine.drip_tick() == 0
     assert sender.sent == []  # muzlatilgan — yuborilmadi
 
     # Admin qaytdi — so'rov navbatdan davom etadi.
@@ -582,7 +589,7 @@ async def test_drip_skips_inactive_admin(session_factory):
         admin = await session.get(Admin, ADMIN_ID)
         admin.is_active = True
         await session.commit()
-    assert await engine.drip_tick() is True
+    assert await engine.drip_tick() == 1
     assert len(sender.sent) == 1
 
 

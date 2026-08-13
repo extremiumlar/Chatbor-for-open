@@ -61,7 +61,8 @@ HELP_TEXT = (
     "qo'shish)\n"
     "/shadow — soya rejimi (standart: yoqilgan — mijozga hech narsa yozilmaydi)\n"
     "/vstats — v2 statistika (Bugun/Hafta/Oy; oddiy admin faqat o'zinikini "
-    "ko'radi). Kunlik hisobot 21:00 da guruhga avtomatik tushadi."
+    "ko'radi). Kunlik hisobot guruhga avtomatik tushadi\n"
+    "/setreporttime HH:MM — kunlik hisobot vaqtini o'zgartirish (Toshkent)"
 )
 
 

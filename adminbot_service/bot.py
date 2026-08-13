@@ -115,19 +115,26 @@ from core.logic.check_patterns import (
 from core.logic.settings_store import (
     get_checker_account,
     get_customer_timeout_seconds,
+    get_daily_report_time,
     get_group_chat_id,
     get_operator_codes,
     is_shadow_mode,
     is_verbose,
     set_checker_account,
     set_customer_timeout_seconds,
+    set_daily_report_time,
     set_group_chat_id,
     set_operator_codes,
     set_shadow_mode,
     set_verbose,
 )
 from core.logic.stats import gather_stats
-from core.logic.v2_stats import gather_v2_stats, render_stats, tashkent_day_start_utc
+from core.logic.v2_stats import (
+    gather_v2_stats,
+    next_daily_report_due_utc,
+    render_stats,
+    tashkent_day_start_utc,
+)
 from core.logic.templates import DEFAULTS, ensure_templates_seeded, get_template, list_templates, set_template
 from core.models import (
     Admin,
@@ -1638,6 +1645,61 @@ async def cmd_setactive(
     else:
         lines.append("Ochiq case'lari yo'q.")
     await message.answer("\n".join(lines))
+
+
+@admin_router.message(Command("setreporttime"))
+async def cmd_setreporttime(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """Kunlik hisobot vaqtini o'zgartirish (Toshkent, HH:MM) — superadmin.
+
+    MUHIM: shunchaki sozlamani yozish yetmaydi — ochiq DAILY_REPORT ishining
+    `due_at`i ham yangi vaqtga ko'chiriladi, aks holda o'zgarish faqat
+    KEYINGI hisobotdan keyin kuchga kirardi.
+    """
+    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
+        await message.answer("Faqat Owner/Rop hisobot vaqtini o'zgartira oladi.")
+        return
+    if not command.args:
+        async with get_session() as session:
+            current = await get_daily_report_time(session)
+        await message.answer(
+            f"Joriy hisobot vaqti: <b>{current}</b> (Toshkent)\n\n"
+            f"O'zgartirish: <code>/setreporttime 20:30</code>"
+        )
+        return
+
+    async with get_session() as session:
+        try:
+            await set_daily_report_time(session, command.args)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        new_time = await get_daily_report_time(session)
+
+        # Ochiq DAILY_REPORT ishini yangi vaqtga ko'chirish.
+        result = await session.execute(
+            select(ScheduledJob).where(
+                ScheduledJob.kind == JobKind.DAILY_REPORT,
+                ScheduledJob.done_at.is_(None),
+            )
+        )
+        new_due = next_daily_report_due_utc(datetime.datetime.utcnow(), new_time)
+        jobs = result.scalars().all()
+        for job in jobs:
+            job.due_at = new_due
+        if not jobs:
+            session.add(ScheduledJob(kind=JobKind.DAILY_REPORT, due_at=new_due))
+        await log_action(
+            session, message.from_user.id, "set_report_time", new_time
+        )
+        await session.commit()
+
+    local_due = new_due + datetime.timedelta(hours=5)
+    await message.answer(
+        f"✅ Kunlik hisobot vaqti: <b>{new_time}</b> (Toshkent).\n"
+        f"Keyingi hisobot: {local_due:%d.%m.%Y %H:%M} da guruhga tushadi."
+    )
 
 
 @admin_router.message(Command("vstats"))

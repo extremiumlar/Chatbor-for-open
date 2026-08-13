@@ -73,8 +73,10 @@ systemctl restart teleton-v2                    # yangi klient ulanadi
 - **Reaksiya emojilari:** Telegram standart to'plamida ⚠️ va ⏳ yo'q — tizim
   rad etilsa 🤔 (noaniq) va 😴 (javobsiz) bilan qo'yadi. 👍/👎 odatdagidek.
 - **Taymerlar bazada** (`scheduled_jobs`) — restart hech narsani yo'qotmaydi.
-- **Drip:** tekshiruvchiga har 20 soniyada ko'pi bilan 1 so'rov; har admin
-  chatida bir vaqtda faqat 1 ochiq so'rov (javob-moslashuv chalkashmasin).
+- **Navbat:** tezlik cheklovi yo'q — navbatdagi so'rovlar 20 soniya ichida
+  hammasi tekshiruvchiga ketadi. Ko'p so'rov ochiq bo'lganda tekshiruvchi
+  reply yoki oxirgi-4-raqam bilan javob bergani ma'qul (oddiy "bor" eng eski
+  so'rovga yoziladi).
 - **Kesh:** bitta nomer 10 daqiqa ichida qayta so'ralsa tekshiruvchi bezovta
   qilinmaydi (FAILED'dan keyingi qo'lda /check bundan mustasno).
 - **Kech javob:** natija avtomatik to'g'irlanadi, mijozga uzrni admin o'zi

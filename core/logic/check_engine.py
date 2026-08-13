@@ -176,15 +176,19 @@ class CheckEngine:
     # Drip — davriy chiqarish (6.2)
     # ------------------------------------------------------------------ #
 
-    async def drip_tick(self) -> bool:
-        """Bitta tick: navbatdagi ENG ESKI mos so'rovni yuboradi.
+    async def drip_tick(self) -> int:
+        """Bitta tick: navbatdagi BARCHA mos so'rovlarni yuboradi.
 
-        Qaytaradi: yuborildimi. Har tick'da ko'pi bilan bitta yuborish —
-        drip tezligi shu bilan kafolatlanadi.
+        Foydalanuvchi qarori (2026-08-13): tezlik cheklovi OLIB TASHLANGAN —
+        tekshiruvchi bir vaqtda istalgancha so'rov qabul qila oladi. "Drip"
+        endi faqat davriy tekshiruv sikli (navbatga tushgan so'rov keyingi
+        tick'da darhol ketadi), tomchilab-cheklash emas.
+
+        Qaytaradi: shu tick'da yuborilgan so'rovlar soni.
         """
         async with self.session_factory() as session:
             if not await self._ready(session):
-                return False
+                return 0
 
             result = await session.execute(
                 select(CheckRequest)
@@ -193,20 +197,14 @@ class CheckEngine:
             )
             queued = result.scalars().all()
             if not queued:
-                return False
+                return 0
 
+            sent_count = 0
             for request in queued:
                 # §4.2b — nofaol adminning so'rovlari MUZLATILADI: navbatda
                 # qoladi, yuborilmaydi (admin qaytsa davom etadi).
                 admin = await session.get(Admin, request.requested_by_admin_id)
                 if admin is not None and not admin.is_active:
-                    continue
-
-                # 6.3 — bu admin chatida ochiq so'rov bormi (FIFO har chatda).
-                busy = await self._admin_has_open_sent(
-                    session, request.requested_by_admin_id
-                )
-                if busy:
                     continue
 
                 template = await get_check_request_template(session)
@@ -216,7 +214,9 @@ class CheckEngine:
                     request.requested_by_admin_id, text
                 )
                 if msg_id is None:
-                    # B-6 — bir so'rov uchun bir marta alert (drip spam emas).
+                    # B-6 — bir so'rov uchun bir marta alert (spam emas).
+                    # Bitta adminning sessiyasi o'lik bo'lsa boshqalarning
+                    # so'rovlari to'silmasin — continue.
                     if request.id not in self._send_failure_alerted:
                         self._send_failure_alerted.add(request.id)
                         await self.alert_sink(
@@ -225,7 +225,7 @@ class CheckEngine:
                             f"ishlamayapti?). So'rov navbatda qoladi.",
                             True,
                         )
-                    return False
+                    continue
                 self._send_failure_alerted.discard(request.id)
 
                 now = datetime.datetime.utcnow()
@@ -247,15 +247,15 @@ class CheckEngine:
                     )
                 )
                 await session.commit()
+                sent_count += 1
                 log.info(
                     "So'rov #%s tekshiruvchiga yuborildi (%s, admin_id=%s).",
                     request.id,
                     request.phone,
                     request.requested_by_admin_id,
                 )
-                return True
 
-            return False
+            return sent_count
 
     # ------------------------------------------------------------------ #
     # Tekshiruvchi javobi (6.4)
@@ -413,7 +413,14 @@ class CheckEngine:
         text: str,
         reply_to_msg_id: int | None,
     ) -> CheckRequest | None:
-        """6.4.5 — reply > oxirgi 4 raqam > FIFO(yagona)."""
+        """6.4.5 — reply > oxirgi 4 raqam > FIFO (eng eski ochiq so'rov).
+
+        Tezlik cheklovi olib tashlangani uchun (2026-08-13) bir chatda bir
+        nechta ochiq so'rov bo'lishi normal holat. Raqamsiz oddiy javob
+        ("bor") ENG ESKI ochiq so'rovga bog'lanadi — tekshiruvchi tartib
+        bilan javob beradi degan taxmin. Aniqlik kerak bo'lsa tekshiruvchi
+        reply yoki oxirgi-4-raqam bilan yozadi (qo'llanmada tavsiya qilingan).
+        """
         if reply_to_msg_id is not None:
             for r in open_requests:
                 if r.sent_message_id == reply_to_msg_id:
@@ -429,11 +436,9 @@ class CheckEngine:
             if len(matches) == 1:
                 return matches[0]
             if len(matches) > 1:
-                return None  # ikkitadan ortiq mos — taxmin qilinmaydi
+                return None  # bir xil oxirgi-4-raqamli IKKI so'rov — taxmin yo'q
 
-        if len(open_requests) == 1:
-            return open_requests[0]
-        return None
+        return open_requests[0] if open_requests else None
 
     async def _finalize(
         self,

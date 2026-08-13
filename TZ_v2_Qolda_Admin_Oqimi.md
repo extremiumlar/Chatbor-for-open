@@ -301,23 +301,27 @@ Yangi kampaniya boshlanib eski natijalar xalaqit beradigan bo'lsa, baza
 qo'lda tozalanadi (arxivlash skripti bilan — B-6 da oddiy `scripts/`
 buyrug'i sifatida qo'shib qo'yiladi).
 
-### 6.2 Global tomchilagich (drip)
+### 6.2 So'rov navbati
 
-Tekshiruvchi — tirik odam. 1.5 soatlik taymerlar birdaniga ishga tushsa,
-unga o'nlab xabar yog'iladi.
+> **O'zgartirilgan (2026-08-13, foydalanuvchi qarori):** tezlik cheklovi
+> ("har 20 soniyada 1 ta", "har chatda bitta ochiq so'rov") **olib
+> tashlandi** — tekshiruvchi bir vaqtda istalgancha so'rov qabul qila oladi.
 
-- Barcha adminlar bo'ylab **umumiy** navbat.
-- Chiqish tezligi sozlanadi (standart: har **20 soniyada 1 ta**).
-- Navbat **bazada** turadi (`check_requests` + `scheduled_jobs`), xotirada
-  emas — restart'da yo'qolmaydi.
+- Barcha adminlar bo'ylab **umumiy** navbat, **bazada** turadi
+  (`check_requests` + `scheduled_jobs`) — restart'da yo'qolmaydi.
+- Navbat davriy tekshiriladi (`DRIP_INTERVAL_SECONDS`, standart 20s) va har
+  siklda navbatdagi **barcha** so'rovlar darhol yuboriladi — ya'ni yangi
+  so'rov ko'pi bilan 20 soniya ichida tekshiruvchiga yetadi.
 
 ### 6.3 So'rov yuborish
 
 So'rov **o'sha adminning o'z akkauntidan** tekshiruvchi lichkaga boradi.
 
 > Bu muhim afzallik: har adminning tekshiruvchi bilan **alohida dialogi** bor,
-> shuning uchun javob qaysi so'rovga tegishli ekani chalkashmaydi. Har chat
-> uchun mustaqil FIFO — bir vaqtda o'sha chatda faqat 1 ta ochiq so'rov.
+> shuning uchun javob qaysi so'rovga tegishli ekani chalkashmaydi. Bir chatda
+> bir vaqtda BIR NECHTA ochiq so'rov bo'lishi mumkin (cheklov olib tashlangan,
+> 2026-08-13) — bunday holatda tekshiruvchiga reply yoki oxirgi-4-raqam bilan
+> javob berish tavsiya qilinadi (6.4.5).
 
 **Tayyorgarlik talabi:** tekshiruvchi har bir admin akkauntini kontaktga
 qo'shishi (yoki hech bo'lmaganda ulardan xabar qabul qilishi) kerak — aks
@@ -400,11 +404,12 @@ tasdiqlagan real odatlar). Javobni so'rovga bog'lash ustuvorligi:
 | 2 | "...1234 bor" — **oxirgi 4 raqam** bilan | Ochiq so'rovlar ichidan oxirgi 4 raqami mos kelganiga |
 | 3 | Shunchaki "bor" | O'sha chatdagi **eng eski ochiq so'rovga** (FIFO) |
 
-- 2-usulda mos keluvchi so'rov topilmasa yoki **ikkitadan ortiq** mos kelsa
-  → `NEEDS_ADMIN` (taxmin qilinmaydi).
-- 3-usul faqat o'sha chatda **bitta** ochiq so'rov bo'lsa xavfsiz; bir nechta
-  bo'lsa → `NEEDS_ADMIN`. (Drip navbati "har chatda bir vaqtda 1 ta so'rov"
-  qoidasini saqlagani uchun bu holat kam uchraydi.)
+- 2-usulda **ikkitadan ortiq** so'rov mos kelsa (bir xil oxirgi 4 raqam) →
+  bog'lanmaydi, alert (taxmin qilinmaydi).
+- 3-usul (o'zgartirilgan 2026-08-13): raqamsiz oddiy javob o'sha chatdagi
+  **eng eski ochiq so'rovga** bog'lanadi — tekshiruvchi tartib bilan javob
+  beradi degan taxmin. Bir vaqtda ko'p so'rov ochiq bo'lganda aniqlik uchun
+  reply yoki oxirgi-4-raqam tavsiya qilinadi.
 - Birinchi xabar hech qaysi shablonga mos kelmasa (masalan *"bir daqiqa"*) —
   **kutiladi**, keyingi xabar tekshiriladi.
 - `CHECKER_STALL_MINUTES` ichida hech narsa tanilmasa → `NEEDS_ADMIN`.
@@ -645,13 +650,13 @@ poller har 30 soniyada muddati kelganlarni oladi.
 | `GROUP_CHAT_ID` | Nazorat guruhi | — |
 | `CHECK_DELAY_MINUTES` | Tekshiruvgacha kutish | 90 |
 | `IMAGE_BATCH_WINDOW_SECONDS` | Rasmlarni bitta partiya deb hisoblash oynasi | 15 |
-| `DRIP_INTERVAL_SECONDS` | Tekshiruvchiga so'rov chiqish tezligi | 20 |
+| `DRIP_INTERVAL_SECONDS` | Navbatni tekshirish davri (har siklda HAMMASI ketadi — tezlik cheklovi yo'q) | 20 |
 | `CHECKER_ACCOUNT` | Tekshiruvchi lichka (username / ID) | — |
 | `CHECKER_STALL_MINUTES` | Javobsizlik alert vaqti | 30 |
 | `CHECK_CACHE_MINUTES` | Takroriy tekshiruv keshi | 10 |
 | `NO_SCREENSHOT_FIRST_MINUTES` | Birinchi rasmsizlik eslatmasigacha | 30 |
 | `NO_SCREENSHOT_REMINDERS` | Rasmsizlik eslatmalari soni | 3 |
-| `DAILY_REPORT_TIME` | Kunlik hisobot vaqti (guruh + superadmin) | 21:00 |
+| `DAILY_REPORT_TIME` | Kunlik hisobot vaqti (guruh + superadmin); adminbotda `/setreporttime HH:MM` bilan o'zgartiriladi | 21:00 |
 | **`SHADOW_MODE`** | Soya rejimi — mijozga hech narsa yozilmaydi (§6.4.6) | **yoqilgan** |
 | Shablonlar | `SCREENSHOT_CAPTION`, `RESULT_PASSED`, `RESULT_FAILED` | — |
 | Tanish shablonlari | `CHECK_PASSED`, `CHECK_FAILED`, `CHECK_ERROR` (ro'yxat) | — |

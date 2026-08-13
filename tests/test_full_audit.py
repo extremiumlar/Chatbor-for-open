@@ -314,11 +314,12 @@ def test_bind_reply_priorities():
     # last4 IKKI so'rovga mos — taxmin qilinmaydi (None -> alert).
     assert engine._bind_reply([r1, r2], "1234 bor", reply_to_msg_id=None) is None
 
-    # 3-ustuvorlik: raqamsiz javob, yagona ochiq so'rov — FIFO.
+    # 3-ustuvorlik: raqamsiz javob — ENG ESKI ochiq so'rovga (FIFO).
     assert engine._bind_reply([r1], "bor", reply_to_msg_id=None) is r1
 
-    # Raqamsiz javob, bir nechta ochiq — bog'lab bo'lmaydi.
-    assert engine._bind_reply([r1, r2], "bor", reply_to_msg_id=None) is None
+    # Raqamsiz javob, bir nechta ochiq — eng eskisiga (tekshiruvchi tartib
+    # bilan javob beradi; cheklov olib tashlangan, 2026-08-13).
+    assert engine._bind_reply([r1, r2], "bor", reply_to_msg_id=None) is r1
 
     # Raqam bor lekin hech biriga mos emas -> FIFO qoidasiga tushadi.
     assert engine._bind_reply([r1], "9999 bor", reply_to_msg_id=None) is r1
