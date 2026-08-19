@@ -21,6 +21,7 @@ from sqlalchemy import select
 from telethon import TelegramClient
 from telethon.errors import AuthKeyUnregisteredError, SessionRevokedError, UnauthorizedError
 
+from core.logic.admins import refresh_admin_identity
 from core.models import Admin, AdminSession, SessionStatus
 
 log = logging.getLogger("multi_client")
@@ -139,6 +140,13 @@ class MultiClientManager:
             self.clients[admin.id] = managed
             return False
 
+        # TZ v2 5.2 — guruh caption'ida admin ISMI ko'rinishi kerak
+        # ("🧑‍💼 Admin: Aziz Karimov"). `refresh_admin_identity` faqat
+        # adminbot muloqotidan chaqirilardi, shuning uchun adminbotga hech
+        # qachon yozmagan admin barcha caption'larda xom raqam bo'lib
+        # qolaverardi. Sessiya ulanganda ism allaqachon qo'limizda.
+        await self._refresh_identity(client, admin, managed)
+
         wire_handlers(client, admin)
         await self._set_status(managed, SessionStatus.CONNECTED, error=None)
         self.clients[admin.id] = managed
@@ -149,6 +157,40 @@ class MultiClientManager:
             session_row.session_name,
         )
         return True
+
+    async def _refresh_identity(
+        self, client: TelegramClient, admin: Admin, managed: ManagedClient
+    ) -> None:
+        """Telegram'dagi joriy ism/username bilan `admins` qatorini yangilaydi.
+
+        `admin` obyekti handler'larga uzatiladi va caption aynan `admin.name`
+        ni ishlatadi — shuning uchun bazadagina emas, shu OBYEKTDA ham
+        yangilanadi (aks holda o'zgarish faqat keyingi restartda ko'rinardi).
+
+        Xato bo'lsa yutiladi: ism — qulaylik, uning ustidan butun sessiyani
+        yiqitish mumkin emas.
+        """
+        try:
+            me = await client.get_me()
+            if me is None:
+                return
+            full = " ".join(p for p in (me.first_name, me.last_name) if p) or None
+            async with self.session_factory() as db:
+                admin_row = await db.get(Admin, admin.id)
+                if admin_row is None:
+                    return
+                await refresh_admin_identity(db, admin_row, full, me.username)
+                admin.name = admin_row.name
+                admin.full_name = admin_row.full_name
+                admin.tg_username = admin_row.tg_username
+                managed.admin_name = admin_row.name
+        except Exception:
+            log.warning(
+                "Admin %s ismini Telegram'dan yangilab bo'lmadi — caption'da "
+                "eski nom qoladi.",
+                admin.id,
+                exc_info=True,
+            )
 
     async def stop_all(self) -> None:
         for managed in self.clients.values():

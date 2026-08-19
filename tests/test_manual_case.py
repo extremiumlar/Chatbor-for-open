@@ -80,6 +80,116 @@ async def test_coupon_saved_as_signal_only_once(session_factory, make_manager):
     assert case.coupon_at is not None
 
 
+# --------------------------------------------------------------------------- #
+# T-14 — kupon TO'G'RI case'ga yozilsin
+#
+# Jonli sinovda mijoz "907778899 kuponim 123456" yozdi. Yangi nomer rad
+# etildi (boshqa case ochiq edi), lekin kupon ESKI case'ga yozilib qoldi.
+# TZ §9.2 kuponni dalil deb belgilaydi — noto'g'ri nomerga bog'langan kupon
+# dalilni ham, §6.1a2 dagi rasmsizlik eslatmasini ham buzadi.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_t14_coupon_with_another_phone_is_not_written_to_the_open_case(
+    session_factory, make_manager
+):
+    """Ochiq case A turganda mijoz "B_nomer + kupon" yozsa, kupon A ga
+    YOZILMASLIGI kerak."""
+    await _seed_admin(session_factory)
+    manager = make_manager()
+    a = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
+
+    # OTHER_PHONE uchun case ochilmaydi (A hali ochiq) — kupon ham
+    # hech qayerga yozilmasligi kerak.
+    await manager.handle_coupon_detected(TG_ID, "123456", phone=OTHER_PHONE)
+
+    async with session_factory() as session:
+        case_a = await session.get(Case, a.case.id)
+        cases = (await session.execute(select(Case))).scalars().all()
+    assert case_a.coupon is None, "kupon boshqa nomerning case'iga yozilib ketdi"
+    assert len(cases) == 1
+
+
+@pytest.mark.asyncio
+async def test_t14_coupon_with_matching_phone_is_saved(session_factory, make_manager):
+    """Nomer o'sha case'niki bo'lsa — kupon yozilishi kerak."""
+    await _seed_admin(session_factory)
+    manager = make_manager()
+    outcome = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
+
+    await manager.handle_coupon_detected(TG_ID, "123456", phone=PHONE)
+
+    async with session_factory() as session:
+        case = await session.get(Case, outcome.case.id)
+    assert case.coupon == "123456"
+    assert case.coupon_at is not None
+
+
+@pytest.mark.asyncio
+async def test_t14_coupon_goes_to_the_case_of_its_own_phone(
+    session_factory, make_manager
+):
+    """Ikkita case bor: eskisi yopilgan, yangisi ochiq. Kupon o'z nomeriga
+    tegishli case'ga tushishi kerak — "oxirgi ochiq"ka emas."""
+    await _seed_admin(session_factory)
+    manager = make_manager()
+
+    eski = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
+    async with session_factory() as session:
+        case = await session.get(Case, eski.case.id)
+        case.status = CaseStatus.REJECTED  # yopildi
+        await session.commit()
+
+    yangi = await manager.handle_phone_detected(
+        ADMIN_ID, TG_ID, None, None, OTHER_PHONE
+    )
+
+    await manager.handle_coupon_detected(TG_ID, "123456", phone=OTHER_PHONE)
+
+    async with session_factory() as session:
+        eski_db = await session.get(Case, eski.case.id)
+        yangi_db = await session.get(Case, yangi.case.id)
+    assert yangi_db.coupon == "123456"
+    assert eski_db.coupon is None
+
+
+@pytest.mark.asyncio
+async def test_t14_coupon_for_a_closed_case_is_ignored(session_factory, make_manager):
+    """Nomer aniq ko'rsatilgan, lekin unga tegishli case yopilgan — kuponni
+    boshqa joyga yozib qo'yish xato dalil yaratardi."""
+    await _seed_admin(session_factory)
+    manager = make_manager()
+    eski = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
+    async with session_factory() as session:
+        case = await session.get(Case, eski.case.id)
+        case.status = CaseStatus.REJECTED
+        await session.commit()
+
+    await manager.handle_coupon_detected(TG_ID, "123456", phone=PHONE)
+
+    async with session_factory() as session:
+        case = await session.get(Case, eski.case.id)
+    assert case.coupon is None
+
+
+@pytest.mark.asyncio
+async def test_t14_coupon_without_phone_still_uses_latest_open_case(
+    session_factory, make_manager
+):
+    """Regressiya: nomersiz kupon (alohida xabarda) avvalgidek oxirgi ochiq
+    case'ga bog'lanadi — bu to'g'ri xatti-harakat."""
+    await _seed_admin(session_factory)
+    manager = make_manager()
+    outcome = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
+
+    await manager.handle_coupon_detected(TG_ID, "123456")
+
+    async with session_factory() as session:
+        case = await session.get(Case, outcome.case.id)
+    assert case.coupon == "123456"
+
+
 @pytest.mark.asyncio
 async def test_coupon_without_open_case_ignored(session_factory, make_manager):
     await _seed_admin(session_factory)

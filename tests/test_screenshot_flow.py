@@ -87,16 +87,146 @@ async def test_caption_contains_required_fields(session_factory, make_flow):
     decision = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
 
     assert f"#{case.short_code}" in decision.caption
-    assert "@user1 (Dilnoza)" in decision.caption
+    # T-13 — mijoz endi BOSILADIGAN havola (TZ §5.2), username yonida.
+    assert f'<a href="tg://user?id={TG_ID}">Dilnoza</a> (@user1)' in decision.caption
     assert "+998 90 123 45 67" in decision.caption
     assert "Admin: Aziz" in decision.caption
     assert "Tekshiruv:" in decision.caption
 
 
+# --------------------------------------------------------------------------- #
+# T-15 — §5.3 shabloni mijozga BIR MARTA
+# --------------------------------------------------------------------------- #
+
+
 @pytest.mark.asyncio
-async def test_second_batch_same_phone_marked_duplicate_with_alert(
+async def test_t15_followup_template_is_sent_only_once_per_case(
     session_factory, make_flow
 ):
+    """Jonli sinovda mijoz 3 partiyadan keyin bir xil matnni 3 marta oldi.
+    Admin rasmni qayta tashlashi normal (§6.1a) — mijoz uchun bu spam."""
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    flow = make_flow()
+
+    first = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+    second = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
+    third = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [30], 1)
+
+    assert first.customer_text, "birinchi partiyada §5.3 matni bo'lishi kerak"
+    assert second.customer_text is None
+    assert third.customer_text is None
+
+
+@pytest.mark.asyncio
+async def test_t15_new_case_gets_the_template_again(session_factory, make_flow):
+    """Cheklov CASE ichida — yangi case yangi matn oladi (aks holda mijoz
+    keyingi murojaatida umuman javob olmay qolardi)."""
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    flow = make_flow()
+
+    first = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+    await _open_second_case(session_factory)
+    yangi_case_birinchi = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
+
+    assert first.customer_text
+    assert yangi_case_birinchi.customer_text
+
+
+# --------------------------------------------------------------------------- #
+# T-13 — mijozga `tg://user?id=` havolasi
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_caption_links_customer_without_username(session_factory, make_flow):
+    """Username'i yo'q mijozga ham o'tish imkoni bo'lishi kerak — avval
+    caption'da bosilmaydigan `id:6644467393` turardi."""
+    from core.models import User
+
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.tg_user_id == TG_ID))
+        ).scalars().first()
+        user.tg_username = None
+        await session.commit()
+
+    decision = await make_flow().register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+
+    assert f'<a href="tg://user?id={TG_ID}">Dilnoza</a>' in decision.caption
+    assert "(@" not in decision.caption  # username yo'q — qavs ham yo'q
+
+
+@pytest.mark.asyncio
+async def test_caption_escapes_html_in_user_supplied_text(session_factory, make_flow):
+    """Caption HTML rejimida yuboriladi, shuning uchun mijoz/admin matni
+    ekranlanishi shart — aks holda ismida `<` bo'lgan mijoz butun caption'ni
+    buzardi (havola ham ishlamay qolardi)."""
+    from core.models import User
+
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.tg_user_id == TG_ID))
+        ).scalars().first()
+        user.display_name = "Ali <b>&"
+        user.tg_username = "a&b"
+        await session.commit()
+
+    decision = await make_flow().register_batch(ADMIN_ID, "A<z>iz", TG_ID, [10], 1)
+
+    assert "Ali &lt;b&gt;&amp;" in decision.caption
+    assert "(@a&amp;b)" in decision.caption
+    assert "Admin: A&lt;z&gt;iz" in decision.caption
+    # Faqat bizning havola tegi qolishi kerak, mijoz kiritgani emas.
+    assert decision.caption.count("<a href=") == 1
+    assert "<b>" not in decision.caption
+
+
+# --------------------------------------------------------------------------- #
+# Dublikat (§5.4) — T-10
+#
+# MUHIM farq: dublikat "shu nomer uchun BOSHQA case'da rasm tashlangan"
+# degani. Bir case'ga qo'shimcha rasm tashlash §6.1a bo'yicha NORMAL holat.
+# Avval ikkovi ham dublikat deb belgilanardi va jonli sinovda superadminga
+# "ikki admin bitta mijoz ustida ishlayapti" degan noto'g'ri alert ketardi
+# (aslida admin ham, case ham bitta edi).
+# --------------------------------------------------------------------------- #
+
+
+async def _open_second_case(session_factory, phone=PHONE):
+    """O'sha mijoz + o'sha nomer uchun IKKINCHI case ochadi.
+
+    To'g'ridan-to'g'ri bazaga yoziladi: `ManualCaseManager`ning o'z siyosati
+    (ochiq case turganda yangisini ochmaslik) bu yerda tekshirilayotgan
+    narsa emas — bizga faqat "ikki xil case" holati kerak.
+    """
+    from core.models import User
+
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.tg_user_id == TG_ID))
+        ).scalars().first()
+        case = Case(user_id=user.id, phone=phone, status=CaseStatus.NUMBER_RECEIVED)
+        session.add(case)
+        await session.flush()
+        case.short_code = f"C{case.id}"
+        await session.commit()
+        return case.id
+
+
+@pytest.mark.asyncio
+async def test_second_batch_on_the_same_case_is_not_a_duplicate(
+    session_factory, make_flow
+):
+    """T-10 — §6.1a: admin o'sha case'ga ikkinchi marta rasm tashlasa, bu
+    normal holat. Dublikat belgisi ham, alert ham bo'lmasligi kerak."""
     await _seed_admin_and_case(session_factory)
     await _set_group(session_factory)
     alerts: list[str] = []
@@ -109,14 +239,76 @@ async def test_second_batch_same_phone_marked_duplicate_with_alert(
     second = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
 
     assert first.is_duplicate is False
+    assert second.is_duplicate is False, "o'sha case'ga qo'shimcha rasm dublikat emas"
+    assert "avval ham rasm tashlangan" not in second.caption
+    assert not [a for a in alerts if "DUBLIKAT" in a], alerts
+
+    async with session_factory() as session:
+        batches = (await session.execute(select(ScreenshotBatch))).scalars().all()
+    assert batches[1].is_duplicate is False
+    assert batches[1].duplicate_of_batch_id is None
+
+
+@pytest.mark.asyncio
+async def test_batch_in_another_case_with_same_phone_is_a_duplicate(
+    session_factory, make_flow
+):
+    """T-10 — haqiqiy dublikat: o'sha nomer BOSHQA case'da qayta paydo
+    bo'ldi. Bu holatda belgi ham, alert ham qolishi kerak."""
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    alerts: list[str] = []
+
+    async def capture(message: str, important: bool = True) -> None:
+        alerts.append(message)
+
+    flow = make_flow(alert_sink=capture)
+    first = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+
+    await _open_second_case(session_factory)
+    second = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
+
+    assert first.is_duplicate is False
     assert second.is_duplicate is True
     assert "avval ham rasm tashlangan" in second.caption
-    assert any("DUBLIKAT" in a for a in alerts)
+    assert any("DUBLIKAT" in a for a in alerts), alerts
 
     async with session_factory() as session:
         batches = (await session.execute(select(ScreenshotBatch))).scalars().all()
     assert batches[1].is_duplicate is True
     assert batches[1].duplicate_of_batch_id == batches[0].id
+
+
+@pytest.mark.asyncio
+async def test_duplicate_alert_names_the_real_reason(session_factory, make_flow):
+    """T-10 — sabab ikki xil va ular teng emas: o'sha adminning takrori
+    yoki ikki adminning to'qnashuvi. Avval ikkovi ham "ikki admin
+    ishlayapti" deb xabar qilinardi."""
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    alerts: list[str] = []
+
+    async def capture(message: str, important: bool = True) -> None:
+        alerts.append(message)
+
+    flow = make_flow(alert_sink=capture)
+    await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+
+    # (a) O'SHA admin, boshqa case.
+    await _open_second_case(session_factory)
+    await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
+    assert "O'SHA admin" in alerts[-1]
+    assert "IKKI ADMIN" not in alerts[-1]
+
+    # (b) BOSHQA admin, yana boshqa case.
+    async with session_factory() as session:
+        session.add(Admin(id=2, tg_user_id=902, name="Bekzod"))
+        await session.commit()
+    await _open_second_case(session_factory)
+    await flow.register_batch(2, "Bekzod", TG_ID, [30], 1)
+
+    assert "IKKI ADMIN" in alerts[-1]
+    assert "Aziz" in alerts[-1] and "Bekzod" in alerts[-1]
 
 
 @pytest.mark.asyncio

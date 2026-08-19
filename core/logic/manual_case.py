@@ -128,21 +128,49 @@ class ManualCaseManager:
 
             return await self._open_new_case(session, user, admin_id, phone)
 
-    async def handle_coupon_detected(self, tg_user_id: int, coupon: str) -> None:
+    async def handle_coupon_detected(
+        self, tg_user_id: int, coupon: str, phone: str | None = None
+    ) -> None:
         """Mijoz kupon raqamini yozganda — FAQAT saqlanadi (TZ v2 9.2).
 
         Hech qanday tekshiruv, hech qanday javob yo'q: kupon "mijoz ovoz
         bergan" signali va dalil. Ochiq case bo'lmasa, e'tiborsiz qoldiriladi
         (oddiy suhbatdagi 6 xonali son bo'lishi mumkin).
+
+        `phone` berilgan bo'lsa (kupon nomer bilan BITTA xabarda kelgan),
+        kupon aynan o'sha nomerli case'ga yoziladi. Avval kupon doim "oxirgi
+        ochiq case"ga bog'lanardi — jonli sinovda mijoz "907778899 kuponim
+        123456" yozdi, nomer rad etildi (boshqa case ochiq edi), lekin kupon
+        ESKI case'ga (998901112233) yozilib qoldi. TZ §9.2 kuponni dalil deb
+        belgilaydi — noto'g'ri nomerga bog'langani dalilni ham, §6.1a2 dagi
+        rasmsizlik eslatmasini ham buzadi.
         """
         async with self.session_factory() as session:
             user = await self._get_user(session, tg_user_id)
             if user is None or user.is_blocked:
                 return
 
-            case = await self._get_latest_case(session, user.id)
-            if case is None or case.status not in V2_OPEN_STATUSES:
-                return
+            if phone is not None:
+                result = await session.execute(
+                    select(Case)
+                    .where(Case.user_id == user.id, Case.phone == phone)
+                    .order_by(Case.id.desc())
+                )
+                case = result.scalars().first()
+                if case is None or case.status not in V2_OPEN_STATUSES:
+                    # Nomer aniq ko'rsatilgan, lekin unga tegishli ochiq case
+                    # yo'q — kuponni BOSHQA case'ga yozib qo'yish xato dalil
+                    # yaratadi, shuning uchun e'tiborsiz qoldiramiz.
+                    log.info(
+                        "Kupon uchun %s nomerli ochiq case topilmadi — saqlanmadi.",
+                        phone,
+                    )
+                    return
+            else:
+                case = await self._get_latest_case(session, user.id)
+                if case is None or case.status not in V2_OPEN_STATUSES:
+                    return
+
             if case.coupon is not None:
                 return  # birinchi kupon saqlangan — keyingilari e'tiborsiz
 

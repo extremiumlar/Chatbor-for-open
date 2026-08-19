@@ -19,8 +19,10 @@ Telethon'ga bog'lanmagan — reaksiya qo'yish va mijozga yozish callback'lar
 orqali (relay beradi), butun mantiq tarmoqsiz testlanadi.
 """
 
+import asyncio
 import datetime
 import logging
+import random
 from contextlib import AbstractAsyncContextManager
 from typing import Awaitable, Callable
 
@@ -232,31 +234,52 @@ class ResultDistributor:
     async def _update_batch_and_react(
         self, session, request: CheckRequest, outcome: BatchOutcome
     ) -> None:
+        """Case'ning BARCHA partiyalarini natija bilan belgilaydi.
+
+        Avval faqat OXIRGI partiya belgilanardi. Lekin §6.1a bo'yicha admin
+        rasmni qayta tashlashi normal holat (taymer oxirgi rasm vaqtidan
+        qayta hisoblanadi) — natijada guruhda belgisiz, abadiy PENDING
+        postlar qolib ketardi va §8.2 statistikasi buzilardi (jonli sinovda
+        C7 case'ida 3 partiyadan faqat oxirgisi 👍 oldi).
+
+        Reaksiya QO'LDA o'zgartirilgan partiyalarga tegilmaydi (§7.3 —
+        odam qarori avtomatikadan ustun).
+        """
         result = await session.execute(
             select(ScreenshotBatch)
             .where(ScreenshotBatch.case_id == request.case_id)
-            .order_by(ScreenshotBatch.id.desc())
+            .order_by(ScreenshotBatch.id)
         )
-        batch = result.scalars().first()
-        if batch is None:
+        batches = list(result.scalars().all())
+        if not batches:
             return  # rasmsiz tekshirilgan case — guruh posti yo'q
 
-        batch.outcome = outcome
-        batch.outcome_source = OutcomeSource.AUTO
+        targets = []
+        for batch in batches:
+            if batch.outcome_source == OutcomeSource.MANUAL:
+                continue  # odam qo'lda belgilagan — tegmaymiz
+            batch.outcome = outcome
+            batch.outcome_source = OutcomeSource.AUTO
+            targets.append(batch)
         await session.commit()
 
-        if batch.group_chat_id is None or batch.group_message_id is None:
-            return  # guruhga tushmagan partiya
-
         emoji = REACTION_BY_OUTCOME[outcome]
-        ok = await self.set_reaction(
-            batch.admin_id, batch.group_chat_id, batch.group_message_id, emoji
-        )
-        if not ok:
-            # §7.3 — reaksiya qo'yilmasa natija bazada saqlanadi + alert.
-            await self.alert_sink(
-                f"⚠️ Guruhda reaksiya qo'yib bo'lmadi (partiya #{batch.id}, "
-                f"{emoji}) — guruh sozlamalarida reaksiyalar yopilgan bo'lishi "
-                f"mumkin. Natija bazada saqlangan.",
-                True,
+        for index, batch in enumerate(targets):
+            if batch.group_chat_id is None or batch.group_message_id is None:
+                continue  # guruhga tushmagan partiya
+            if index:
+                # §4.5 — shaxsiy akkauntdan ketma-ket avtomatik amallar
+                # orasida tabiiy pauza (bir case'da 3+ partiya bo'lishi
+                # mumkin, ular birdaniga urilmasin).
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            ok = await self.set_reaction(
+                batch.admin_id, batch.group_chat_id, batch.group_message_id, emoji
             )
+            if not ok:
+                # §7.3 — reaksiya qo'yilmasa natija bazada saqlanadi + alert.
+                await self.alert_sink(
+                    f"⚠️ Guruhda reaksiya qo'yib bo'lmadi (partiya #{batch.id}, "
+                    f"{emoji}) — guruh sozlamalarida reaksiyalar yopilgan "
+                    f"bo'lishi mumkin. Natija bazada saqlangan.",
+                    True,
+                )

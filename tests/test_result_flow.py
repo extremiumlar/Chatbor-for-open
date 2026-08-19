@@ -286,3 +286,102 @@ async def test_notify_failed_job_via_poller(session_factory):
     async with session_factory() as session:
         req = await session.get(CheckRequest, request_id)
     assert req.notified_by == NotifiedBy.ADMIN
+
+
+# --------------------------------------------------------------------------- #
+# T-6 — case'ning BARCHA partiyalari natija olsin
+#
+# §6.1a bo'yicha admin rasmni qayta tashlashi NORMAL holat, shuning uchun
+# bitta case'da bir necha partiya bo'lishi muntazam. Avval faqat OXIRGISI
+# belgilanardi: guruhda belgisiz, abadiy PENDING postlar qolib ketardi va
+# §8.2 statistikasi buzilardi (jonli sinov C7: 3 partiyadan faqat 1 tasi 👍).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    """Partiyalar orasidagi §4.5 pauzasini testda o'tkazib yuboramiz."""
+    import core.logic.result_flow as rf
+
+    async def instant(_seconds):
+        return None
+
+    monkeypatch.setattr(rf.asyncio, "sleep", instant)
+
+
+@pytest.mark.asyncio
+async def test_t6_all_batches_of_a_case_get_outcome_and_reaction(
+    session_factory, no_pause
+):
+    case, engine, _, cb = await _setup(session_factory, shadow=False)
+
+    # Yana ikkita partiya (admin rasmni qayta tashladi) — har biri guruhda.
+    flow = ScreenshotFlow(session_factory=session_factory, alert_sink=_noop_alert)
+    for msg_id in (GROUP_MSG_ID + 6, GROUP_MSG_ID + 12):
+        decision = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [msg_id], 1)
+        await flow.record_group_post(decision.batch_id, GROUP_ID, msg_id)
+
+    await _send_request(engine, case.id)
+    await engine.handle_checker_reply(ADMIN_ID, "bor")
+
+    async with session_factory() as session:
+        batches = (
+            await session.execute(select(ScreenshotBatch).order_by(ScreenshotBatch.id))
+        ).scalars().all()
+
+    assert len(batches) == 3
+    assert all(b.outcome == BatchOutcome.PASSED for b in batches), (
+        "faqat oxirgi partiya belgilandi — qolganlari PENDING qoldi"
+    )
+    reacted = {r[2] for r in cb.reactions}
+    assert reacted == {GROUP_MSG_ID, GROUP_MSG_ID + 6, GROUP_MSG_ID + 12}
+
+
+@pytest.mark.asyncio
+async def test_t6_manually_marked_batch_is_left_alone(session_factory, no_pause):
+    """§7.3 — odam qarori avtomatikadan ustun."""
+    from core.models import OutcomeSource
+
+    case, engine, _, cb = await _setup(session_factory, shadow=False)
+
+    flow = ScreenshotFlow(session_factory=session_factory, alert_sink=_noop_alert)
+    decision = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [99], 1)
+    await flow.record_group_post(decision.batch_id, GROUP_ID, 999)
+
+    # Ikkinchi partiyani admin qo'lda 👎 qilib qo'ygan.
+    async with session_factory() as session:
+        manual = await session.get(ScreenshotBatch, decision.batch_id)
+        manual.outcome = BatchOutcome.FAILED
+        manual.outcome_source = OutcomeSource.MANUAL
+        await session.commit()
+
+    await _send_request(engine, case.id)
+    await engine.handle_checker_reply(ADMIN_ID, "bor")
+
+    async with session_factory() as session:
+        manual = await session.get(ScreenshotBatch, decision.batch_id)
+
+    assert manual.outcome == BatchOutcome.FAILED, "qo'lda qo'yilgan natija bosib ketildi"
+    assert manual.outcome_source == OutcomeSource.MANUAL
+    assert 999 not in {r[2] for r in cb.reactions}
+
+
+@pytest.mark.asyncio
+async def test_t6_batch_without_group_post_is_skipped(session_factory, no_pause):
+    case, engine, _, cb = await _setup(session_factory, shadow=False)
+
+    # Guruhga tushmagan partiya (record_group_post chaqirilmagan).
+    flow = ScreenshotFlow(session_factory=session_factory, alert_sink=_noop_alert)
+    await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [55], 1)
+
+    await _send_request(engine, case.id)
+    await engine.handle_checker_reply(ADMIN_ID, "bor")
+
+    async with session_factory() as session:
+        batches = (
+            await session.execute(select(ScreenshotBatch).order_by(ScreenshotBatch.id))
+        ).scalars().all()
+
+    # Ikkovi ham natija oladi, lekin reaksiya faqat guruhdagisiga.
+    assert all(b.outcome == BatchOutcome.PASSED for b in batches)
+    assert cb.reactions == [(ADMIN_ID, GROUP_ID, GROUP_MSG_ID, "👍")]

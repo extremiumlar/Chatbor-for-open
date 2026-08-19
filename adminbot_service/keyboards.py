@@ -45,14 +45,35 @@ MAIN_MENU_BUTTONS = {
 }
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def main_menu(admin=None) -> ReplyKeyboardMarkup:
+    """Pastdagi doimiy menyu — rolga moslangan (TZ 14, Q43).
+
+    `admin=None` bo'lsa to'liq menyu qaytadi (eski chaqiruvlar bilan
+    moslik uchun). Rol berilsa, o'sha rolga yopiq bo'limlar ko'rsatilmaydi.
+
+    Diqqat: bu faqat KO'RSATISH. Haqiqiy to'siq — `RolePermission`
+    middleware; tugmani yashirish o'zi himoya emas (eski xabardagi tugma
+    keyin ham bosilishi mumkin).
+    """
+    from core.logic import permissions as perms
+
+    def ok(text: str) -> bool:
+        return admin is None or perms.can_use_menu_button(admin, text)
+
+    candidates = [
+        [BTN_STATS, BTN_PROBLEMS],
+        [BTN_BOTS, BTN_PENDING],
+        [BTN_TEMPLATES, BTN_SEARCH],
+        [BTN_SETTINGS, BTN_HELP],
+    ]
+    rows = []
+    for row in candidates:
+        visible = [KeyboardButton(text=t) for t in row if ok(t)]
+        if visible:
+            rows.append(visible)
+
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_PROBLEMS)],
-            [KeyboardButton(text=BTN_BOTS), KeyboardButton(text=BTN_PENDING)],
-            [KeyboardButton(text=BTN_TEMPLATES), KeyboardButton(text=BTN_SEARCH)],
-            [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_HELP)],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         input_field_placeholder="Menyudan tanlang yoki nomer yuboring",
     )
@@ -320,6 +341,8 @@ def settings_menu(verbose: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⏱ Kupon kutish vaqti", callback_data="nav:timeout")],
             [InlineKeyboardButton(text="📋 Audit (admin harakatlari)", callback_data="nav:audit")],
             [InlineKeyboardButton(text="🔧 Tizim holati", callback_data="nav:health")],
+            # TZ v2 4.3 — admin lichkalarining Telethon sessiya holati.
+            [InlineKeyboardButton(text="🔌 Sessiyalar", callback_data="nav:sessions")],
         ]
     )
 

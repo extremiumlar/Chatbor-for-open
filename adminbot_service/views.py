@@ -4,6 +4,8 @@ Handler'lar faqat ma'lumot yig'adi, matn yasashni shu modul bajaradi.
 """
 
 from core.enums import CaseStatus
+from core.logic.admins import display_name
+from core.logic.screenshots import to_tashkent
 
 _STATUS_LABEL = {
     CaseStatus.NUMBER_RECEIVED: "⏳ Navbatda (bot kutilmoqda)",
@@ -36,6 +38,49 @@ def welcome(name: str | None) -> str:
     )
 
 
+def help_for_role(admin, in_group: bool = False) -> str:
+    """Rolga mos buyruqlar ro'yxati — TZ 14 (Q43: "har biri o'z roliga mos
+    ko'rinishni ko'radi").
+
+    Ro'yxat `core.logic.permissions` jadvalidan tuziladi — ya'ni bu yerda
+    ko'rinadigan narsa aynan bajarilishi mumkin bo'lgan narsa. Ikkovi bitta
+    manbadan olinadi, shuning uchun "ko'rinadi-yu ishlamaydi" holati bo'lmaydi.
+    """
+    from core.logic import permissions as perms
+
+    allowed = perms.allowed_commands(admin)
+    by_section: dict[str, list] = {}
+    for p in allowed:
+        by_section.setdefault(p.section, []).append(p)
+
+    lines = [
+        f"ℹ️ <b>Sizga ochiq buyruqlar</b> — {len(allowed)} ta",
+        "",
+        f"Rolingiz: {perms.role_label(admin.role)}",
+        "",
+    ]
+    for section in perms.SECTION_ORDER:
+        items = by_section.get(section)
+        if not items:
+            continue
+        lines.append(f"<b>{section}</b>")
+        for p in items:
+            lines.append(f"  {p.label} — {p.hint}" if p.hint else f"  {p.label}")
+        lines.append("")
+
+    if in_group:
+        lines.append(
+            "<i>Guruhda ham shu buyruqlar ishlaydi. Har kim o'z roliga mos "
+            "ro'yxatni ko'radi — bu ro'yxat aynan sizniki.</i>"
+        )
+    else:
+        lines.append(
+            "<i>Pastdagi menyu ham rolingizga moslangan. Ro'yxatda yo'q "
+            "buyruqni yuborsangiz, tizim rad javobini beradi.</i>"
+        )
+    return "\n".join(lines)
+
+
 HELP_TEXT = (
     "ℹ️ <b>Bo'limlar</b>\n\n"
     "📊 <b>Statistika</b> — bugungi murojaatlar, holatlar bo'yicha sonlar.\n"
@@ -62,7 +107,9 @@ HELP_TEXT = (
     "/shadow — soya rejimi (standart: yoqilgan — mijozga hech narsa yozilmaydi)\n"
     "/vstats — v2 statistika (Bugun/Hafta/Oy; oddiy admin faqat o'zinikini "
     "ko'radi). Kunlik hisobot guruhga avtomatik tushadi\n"
-    "/setreporttime HH:MM — kunlik hisobot vaqtini o'zgartirish (Toshkent)"
+    "/setreporttime HH:MM — kunlik hisobot vaqtini o'zgartirish (Toshkent)\n"
+    "/uyqu off|on [daqiqa] — bot ishlab turgan kompyuterning uyqu rejimi "
+    "(sinov davrida; faqat Windows)"
 )
 
 
@@ -118,20 +165,24 @@ def bots_summary(bots) -> str:
     )
 
 
-def stats_text(stats) -> str:
+def stats_text(stats, own_only: bool = False) -> str:
     if stats.by_status:
         rows = "\n".join(
             f"  {status_label(CaseStatus(s))}: <b>{c}</b>" for s, c in stats.by_status.items()
         )
     else:
         rows = "  (hali murojaat yo'q)"
+    sarlavha = "📊 <b>Statistika</b>"
+    if own_only:
+        # §8.4 — oddiy admin faqat o'zinikini ko'radi; buni yashirmaymiz,
+        # aks holda son "butun tizim" deb noto'g'ri o'qiladi.
+        sarlavha += " <i>(faqat sizniki)</i>"
     return (
-        "📊 <b>Statistika</b>\n\n"
+        f"{sarlavha}\n\n"
         f"Bugungi murojaatlar: <b>{stats.today_count}</b>\n"
         f"Ochiq muammoli holatlar: <b>{stats.problem_count}</b>\n\n"
         f"Holat bo'yicha (barcha vaqt):\n{rows}\n\n"
-        "<i>Har admin bo'yicha alohida taqsimot ko'p akkaunt ishga tushganda "
-        "qo'shiladi (hozircha bitta Teleton akkaunti ishlaydi).</i>"
+        "<i>Admin kesimidagi batafsil ko'rsatkichlar uchun /vstats.</i>"
     )
 
 
@@ -232,7 +283,7 @@ def audit_text(entries) -> str:
     return "\n".join(lines)
 
 
-def health_text(bots, missing_patterns_list, use_real_bots: bool) -> str:
+def health_text(bots, missing_patterns_list, use_real_bots: bool, shadow: bool | None = None) -> str:
     total = len(bots)
     free = sum(1 for b in bots if b.is_active and not b.is_busy)
     lines = [
@@ -241,6 +292,16 @@ def health_text(bots, missing_patterns_list, use_real_bots: bool) -> str:
         f"Tekshiruv botlari: {total} ta (bo'sh: {free})",
         f"Rejim: {'REAL botlar' if use_real_bots else 'MOCK (soxta) bot — sinov rejimi'}",
     ]
+    # T-9 — soya rejimi endi shu yerda ham ko'rinadi. `/shadow` buyrug'i
+    # texnik sozlash bo'lgani uchun oddiy adminga yopiq, lekin soya rejimida
+    # mijozga HECH NARSA yozilmaydi — buni bilmagan operator tizimni buzilgan
+    # deb o'ylaydi. Ko'rish hammaga, o'zgartirish esa faqat Owner/Dasturchiga.
+    if shadow is not None:
+        lines.append(
+            "🕶 Soya rejimi: <b>YOQILGAN</b> — mijozlarga hech narsa yozilmaydi"
+            if shadow
+            else "🟢 Soya rejimi: o'chirilgan — natijalar mijozlarga yuboriladi"
+        )
     if use_real_bots:
         if missing_patterns_list:
             lines.append(
@@ -261,4 +322,67 @@ def health_text(bots, missing_patterns_list, use_real_bots: bool) -> str:
             "qolganlar navbatga tushadi. Parallel ishlash uchun turli bot "
             "qo'shing.",
         ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Sessiyalar — TZ v2 4.3
+# --------------------------------------------------------------------------- #
+
+_SESSION_BELGI = {
+    "CONNECTED": "🟢",
+    "DISCONNECTED": "🟡",
+    "AUTH_LOST": "🔴",
+}
+
+SESSIONS_EMPTY_TEXT = (
+    "🔌 <b>Admin sessiyalari</b>\n\n"
+    "Hech qanday admin sessiyasi ulanmagan — hozir birorta admin lichkasi "
+    "kuzatilmayapti.\n\n"
+    "Qo'shish (serverda): <code>python -m scripts.add_admin_session</code>"
+)
+
+
+def sessions_text(rows) -> str:
+    """TZ v2 4.3 — har akkaunt holati va oxirgi faollik vaqti.
+
+    Nega alohida ekran kerak: sessiya o'lganda o'sha adminning mijozlari
+    JIMGINA yo'qoladi — hech qanday case ochilmaydi, demak "navbat bo'sh"
+    ko'rinadi. Alert bir marta keladi va ko'zdan qochishi mumkin, shuning
+    uchun istalgan payt qarab tekshirish imkoni bo'lishi shart.
+    """
+    lines = ["🔌 <b>Admin sessiyalari</b> (TZ 4.3)", ""]
+    auth_lost = 0
+    for sess, admin in rows:
+        belgi = _SESSION_BELGI.get(sess.status.value, "⚪️")
+        if sess.status.value == "AUTH_LOST":
+            auth_lost += 1
+        lines.append(f"{belgi} <b>{display_name(admin)}</b>")
+        lines.append(f"    {sess.phone or '—'} · <code>{sess.session_name}</code>")
+        lines.append(f"    Holat: {sess.status.value}")
+        if sess.last_seen_at:
+            lines.append(
+                f"    Oxirgi faollik: {to_tashkent(sess.last_seen_at):%H:%M · %d.%m.%Y}"
+            )
+        else:
+            lines.append("    Oxirgi faollik: — (hali bir marta ham ulanmagan)")
+        if not admin.is_active:
+            # Nofaol admin sessiyasi ATAYLAB ko'tarilmaydi (TZ v2 4.2b) —
+            # buni yozmasak, "nega uzilgan?" deb bekorga qidiriladi.
+            lines.append("    ⏸ Admin nofaol — sessiya ataylab ko'tarilmagan")
+        if sess.last_error:
+            lines.append(f"    ⚠️ {sess.last_error[:120]}")
+        lines.append("")
+
+    if auth_lost:
+        lines.append(
+            f"🔴 <b>{auth_lost} ta sessiyada avtorizatsiya yo'qolgan</b> — qayta "
+            "login shart, aks holda o'sha adminlarning mijozlari umuman "
+            "ko'rinmaydi:\n<code>python -m scripts.add_admin_session</code>"
+        )
+    else:
+        lines.append(
+            "<i>🟢 ulangan · 🟡 uzilgan (qayta ulanishga urinadi) · "
+            "🔴 avtorizatsiya yo'qolgan (qayta login shart)</i>"
+        )
     return "\n".join(lines)

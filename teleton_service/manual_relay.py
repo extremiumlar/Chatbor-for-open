@@ -47,6 +47,7 @@ from core.logic.settings_store import (
     get_group_chat_id,
     get_image_batch_window_seconds,
     get_operator_codes,
+    is_shadow_mode,
 )
 from core.logic.templates import ensure_templates_seeded
 from core.models import (
@@ -62,7 +63,8 @@ from sqlalchemy import select
 from teleton_service.batch_collector import BatchCollector
 from teleton_service.multi_client import MultiClientManager
 
-configure_logging("teleton_v2")
+# DIQQAT: `configure_logging` `main()` ichida — T-16 ga qarang (modul
+# darajasida bo'lsa, testlar importda jonli log fayliga yozib yuborardi).
 log = logging.getLogger("manual_relay")
 
 notifier = AdminNotifier(session_factory=get_session, bot_token=settings.adminbot_token)
@@ -93,6 +95,27 @@ _pending_batches: dict[tuple[int, int], tuple[list, datetime.datetime]] = {}
 # main() ishga tushishida bazadan bir marta o'qiladi (adminbot orqali
 # o'zgartirilgan qiymat qayta ishga tushirishda kuchga kiradi).
 _batch_window_seconds: float = settings.image_batch_window_seconds
+
+# §4.2 — kuzatilayotgan admin akkauntlarining tg_user_id to'plami.
+# Adminlar bir-biriga (yoki tekshiruvchi lichkaga) nomer yozganda tizim uni
+# MIJOZ deb qabul qilmasligi kerak: jonli sinovda tekshiruvchiga ketgan har
+# bir so'rov tekshiruvchining O'Z klienti tomonidan "yangi mijoz nomeri" deb
+# o'qilib, soxta case va alert yaratardi. Yangi admin kamdan-kam qo'shiladi
+# va jarayon qayta ishga tushiriladi — shuning uchun davriy yangilash shart
+# emas, `main()` da bir marta to'ldiriladi.
+_admin_tg_ids: set[int] = set()
+
+
+async def _refresh_admin_tg_ids() -> None:
+    global _admin_tg_ids
+    async with get_session() as session:
+        admins = await list_admins(session)
+    _admin_tg_ids = {a.tg_user_id for a in admins}
+
+
+def is_service_account(tg_user_id: int) -> bool:
+    """Xabar kuzatilayotgan admin akkauntidan kelganmi (ya'ni mijoz emas)."""
+    return tg_user_id in _admin_tg_ids
 
 
 async def _send_to_checker(admin_id: int, text: str) -> int | None:
@@ -152,6 +175,36 @@ async def _set_reaction(
                 attempt_emoji,
             )
     return False
+
+
+def is_check_command(text: str) -> bool:
+    """`/check` buyrug'ini ANIQ taniydi — `/checkpatterns` ni emas.
+
+    Avval bu `text.lower().startswith("/check")` edi: u `/checkpatterns`
+    va `/checkpattern` (adminbot buyruqlari) ni ham ushlab, relay ularni
+    birinchi navbatda O'CHIRIB yuborardi. Har adminda Telethon sessiyasi
+    bo'lgani uchun `/checkpatterns` hech kim uchun ishlamas edi (jonli
+    sinovda 3/3 urinishda xabar o'chirildi).
+
+    `/check@BotUsername` ko'rinishi ham qabul qilinadi (guruhda Telegram
+    buyruqqa bot nomini qo'shadi).
+    """
+    if not text:
+        return False
+    return text.split(maxsplit=1)[0].lower().split("@")[0] == "/check"
+
+
+async def customer_writes_allowed() -> bool:
+    """§6.4.6 — mijozga yozish mumkinmi (soya rejimi yoqilmaganmi).
+
+    Alohida funksiya, chunki relay'da mijozga yozadigan ikkita joy bor
+    (§5.3 shabloni va ALREADY_CONFIRMED javobi) va ikkovida ham bir xil
+    tekshiruv kerak. Avval bu tekshiruv faqat `result_flow`da bor edi —
+    shuning uchun soya rejimi yoqilgan bo'lsa ham mijoz relay'dan xabar
+    olaverardi (jonli sinovda bitta mijoz §5.3 matnini 3 marta oldi).
+    """
+    async with get_session() as session:
+        return not await is_shadow_mode(session)
 
 
 async def _send_customer(admin_id: int, customer_tg_id: int, text: str) -> bool:
@@ -299,8 +352,12 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                 # tabiiy pauza (flood/spam-belgi xavfini kamaytiradi).
                 await asyncio.sleep(random.uniform(1.0, 3.0))
                 await client.forward_messages(decision.group_chat_id, messages)
+                # `parse_mode="html"` MAJBURIY: caption ichida mijozga
+                # `tg://user?id=` havolasi bor (TZ v2 5.2). Ko'rsatilmasa
+                # Telethon standart rejimida `<a href=...>` xom matn bo'lib
+                # ko'rinadi.
                 caption_msg = await client.send_message(
-                    decision.group_chat_id, decision.caption
+                    decision.group_chat_id, decision.caption, parse_mode="html"
                 )
                 await screenshot_flow.record_group_post(
                     decision.batch_id, decision.group_chat_id, caption_msg.id
@@ -322,14 +379,23 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
             # §5.3 — mijozga "tekshirish jarayonida" shablon matni (admin
             # akkauntidan). Bu chiquvchi MATN xabari — on_outgoing uni
             # rasm/buyruq emasligi uchun e'tiborsiz qoldiradi (sikl yo'q).
-            try:
-                await client.send_message(chat_id, decision.customer_text)
-            except Exception:
-                log.exception(
-                    "Mijozga shablon yuborilmadi (admin=%s, chat=%s)",
-                    admin.name,
-                    chat_id,
+            #
+            # §6.4.6 — soya rejimida mijozga hech narsa yozilmaydi
+            # (`customer_writes_allowed` izohiga qarang).
+            if not await customer_writes_allowed():
+                log.info(
+                    "Soya rejimi: %s uchun §5.3 shabloni mijozga yuborilmadi.",
+                    decision.case_short_code,
                 )
+            else:
+                try:
+                    await client.send_message(chat_id, decision.customer_text)
+                except Exception:
+                    log.exception(
+                        "Mijozga shablon yuborilmadi (admin=%s, chat=%s)",
+                        admin.name,
+                        chat_id,
+                    )
 
     collector = BatchCollector(process_batch, window_seconds=_batch_window_seconds)
 
@@ -374,6 +440,20 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                 )
                 return
 
+            # Xabar BOSHQA ADMIN akkauntidan kelgan bo'lsa — bu mijoz emas,
+            # xizmat ichidagi yozishma (masalan tekshiruvchiga ketgan
+            # so'rovning o'zi, yoki adminlarning o'zaro suhbati). Case
+            # ochilmaydi, alert berilmaydi (jonli sinovda soxta C8 case'i
+            # ochilib, admin "mijoz" sifatida ro'yxatga tushgan edi).
+            if is_service_account(tg_user_id):
+                log.debug(
+                    "Admin akkauntidan kelgan xabar e'tiborsiz qoldirildi "
+                    "(kuzatuvchi admin=%s, yuboruvchi tg_id=%s).",
+                    admin.name,
+                    tg_user_id,
+                )
+                return
+
             async with get_session() as session:
                 operator_codes = await get_operator_codes(session)
 
@@ -388,11 +468,25 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                 # raqam talab qiladi — nomer ichidan yolg'on kupon olinmaydi.
                 coupon = extract_coupon(text)
                 if coupon is not None:
-                    await case_manager.handle_coupon_detected(tg_user_id, coupon)
+                    # T-14 — kupon aynan SHU xabardagi nomerning case'iga
+                    # yoziladi. Avval `phone` uzatilmasdi va kupon "oxirgi
+                    # ochiq case"ga tushardi: mijoz yangi nomer + kupon
+                    # yozganda kupon eski case'ga yozilib, dalil buzilardi.
+                    await case_manager.handle_coupon_detected(
+                        tg_user_id, coupon, phone=phone
+                    )
                 if outcome.customer_text:
                     # Faqat ALREADY_CONFIRMED holati — boshqa hamma narsada
                     # tizim jim, admin tabiiy suhbatda o'zi yozadi.
-                    await event.reply(outcome.customer_text)
+                    # §6.4.6 — soya rejimida bu ham yuborilmaydi.
+                    if not await customer_writes_allowed():
+                        await notifier.send(
+                            f"🕶 (soya rejimi) {phone}: mijozga "
+                            f'"allaqachon tasdiqlangan" javobi yuborilmadi.',
+                            important=False,
+                        )
+                    else:
+                        await event.reply(outcome.customer_text)
                 # §5.5 — admin rasmni nomerdan OLDIN tashlagan bo'lsa,
                 # endi case ochildi — kutayotgan partiyani bog'laymiz.
                 await flush_pending_batch(event.chat_id)
@@ -490,7 +584,7 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                 return
 
             text = (event.raw_text or "").strip()
-            if text.lower().startswith("/check"):
+            if is_check_command(text):
                 await handle_check_command(event, text)
         except Exception:
             log.exception("Chiquvchi xabar kuzatuvida xato (admin=%s)", admin.name)
@@ -555,6 +649,9 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
 async def main() -> None:
     global _batch_window_seconds
 
+    # T-16 — log sozlash faqat haqiqiy ishga tushishda (import paytida emas).
+    configure_logging("teleton_v2")
+
     await init_db()
     async with get_session() as session:
         await ensure_admins_seeded(session, settings.admin_tg_ids)
@@ -566,6 +663,9 @@ async def main() -> None:
         await ensure_daily_report_scheduled(
             session, await get_daily_report_time(session)
         )
+
+    # §4.2 — admin akkauntlari ro'yxati (ular mijoz deb qabul qilinmasin).
+    await _refresh_admin_tg_ids()
 
     connected = await multi.start_all(wire_handlers)
     log.info("Teleton v2 ishga tushdi: %s ta admin sessiyasi ulandi.", connected)

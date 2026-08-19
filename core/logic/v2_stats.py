@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.enums import CaseStatus
+from core.logic.admins import display_name
 from core.logic.screenshots import TASHKENT_TZ
 from core.models import (
     Admin,
@@ -111,9 +112,20 @@ async def gather_v2_stats(
     session: AsyncSession,
     since_utc: datetime.datetime,
     admin_id: int | None = None,
+    until_utc: datetime.datetime | None = None,
+    include_idle_admins: bool = True,
 ) -> StatsReport:
     """Davr statistikasi. `admin_id` berilsa faqat o'sha admin (TZ v2 8.4 —
-    oddiy admin faqat o'zinikini ko'radi)."""
+    oddiy admin faqat o'zinikini ko'radi).
+
+    `until_utc` — davr oxiri (berilmasa hozirgacha); oldingi davr bilan
+    solishtirish uchun kerak.
+
+    `include_idle_admins` — faoliyati NOL bo'lgan faol adminlar ham ro'yxatda
+    ko'rinadi. Bu ataylab: "hodim bugun umuman ishlamadi" degan ma'lumot
+    boshliq uchun eng qimmat signallardan biri, lekin qatorlar faqat hodisa
+    kelganda yaratilsa, aynan shu hodimlar ro'yxatdan g'oyib bo'lib qolardi.
+    """
     admins = {
         a.id: a for a in (await session.execute(select(Admin))).scalars().all()
     }
@@ -122,17 +134,31 @@ async def gather_v2_stats(
     def row(aid: int | None) -> AdminStatRow:
         key = aid or 0
         if key not in rows:
-            name = admins[aid].name if aid in admins else f"#{aid}"
+            # `display_name` — "Ism Familiya (@username)"; seed paytidagi
+            # xom tg_id emas, aks holda hisobotda kim kimligi bilinmaydi.
+            name = display_name(admins[aid]) if aid in admins else f"#{aid}"
             rows[key] = AdminStatRow(admin_id=aid, admin_name=name)
         return rows[key]
 
     def wanted(aid: int | None) -> bool:
         return admin_id is None or aid == admin_id
 
+    def in_window(ts: datetime.datetime | None) -> bool:
+        if ts is None:
+            return False
+        return until_utc is None or ts < until_utc
+
+    # Faol adminlarning bo'sh qatorlari — nol faoliyat ham ko'rinsin.
+    if include_idle_admins:
+        for aid, a in admins.items():
+            if a.is_active and wanted(aid):
+                row(aid)
+
     # --- nomerlar (cases) ---
-    result = await session.execute(
-        select(Case).where(Case.created_at >= since_utc)
-    )
+    stmt = select(Case).where(Case.created_at >= since_utc)
+    if until_utc is not None:
+        stmt = stmt.where(Case.created_at < until_utc)
+    result = await session.execute(stmt)
     case_created_at: dict[int, datetime.datetime] = {}
     for case in result.scalars().all():
         case_created_at[case.id] = case.created_at
@@ -150,9 +176,10 @@ async def gather_v2_stats(
             row(case.assigned_admin_id).awaiting_screenshot += 1
 
     # --- rasm partiyalari ---
-    result = await session.execute(
-        select(ScreenshotBatch).where(ScreenshotBatch.sent_at >= since_utc)
-    )
+    stmt = select(ScreenshotBatch).where(ScreenshotBatch.sent_at >= since_utc)
+    if until_utc is not None:
+        stmt = stmt.where(ScreenshotBatch.sent_at < until_utc)
+    result = await session.execute(stmt)
     for batch in result.scalars().all():
         if not wanted(batch.admin_id):
             continue
@@ -175,9 +202,10 @@ async def gather_v2_stats(
                 r._number_to_batch_count += 1
 
     # --- tekshiruv so'rovlari ---
-    result = await session.execute(
-        select(CheckRequest).where(CheckRequest.queued_at >= since_utc)
-    )
+    stmt = select(CheckRequest).where(CheckRequest.queued_at >= since_utc)
+    if until_utc is not None:
+        stmt = stmt.where(CheckRequest.queued_at < until_utc)
+    result = await session.execute(stmt)
     for req in result.scalars().all():
         if not wanted(req.requested_by_admin_id):
             continue
@@ -316,6 +344,155 @@ def render_daily_superadmin_report(report: StatsReport, date_str: str) -> str:
         f"so'rov→javob: {_fmt_avg(t.avg_reply_minutes)}",
     ]
     return base + "\n" + "\n".join(extra)
+
+
+# --------------------------------------------------------------------------- #
+# Solishtirish, reyting va hodim kartochkasi
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class ComparisonReport:
+    """Joriy davr + xuddi shunday uzunlikdagi OLDINGI davr."""
+
+    current: StatsReport
+    previous: StatsReport
+
+
+async def gather_with_comparison(
+    session: AsyncSession,
+    since_utc: datetime.datetime,
+    admin_id: int | None = None,
+) -> ComparisonReport:
+    """Joriy davrni va undan bevosita oldingi teng davrni birga yig'adi.
+
+    Masalan "Hafta" tanlansa: joriy 7 kun va undan avvalgi 7 kun — o'sish/
+    pasayish foizini ko'rsatish uchun.
+    """
+    now = datetime.datetime.utcnow()
+    span = now - since_utc
+    prev_since = since_utc - span
+
+    current = await gather_v2_stats(session, since_utc, admin_id=admin_id)
+    previous = await gather_v2_stats(
+        session, prev_since, admin_id=admin_id, until_utc=since_utc,
+        include_idle_admins=False,
+    )
+    return ComparisonReport(current=current, previous=previous)
+
+
+def trend(current: int, previous: int) -> str:
+    """O'sish/pasayish belgisi: 12 → 8 uchun "↗️ +50%" kabi."""
+    if previous == 0:
+        return "🆕" if current > 0 else "—"
+    pct = round(100 * (current - previous) / previous)
+    if pct > 0:
+        return f"↗️ +{pct}%"
+    if pct < 0:
+        return f"↘️ {pct}%"
+    return "→ 0%"
+
+
+def leaderboard(report: StatsReport) -> list[AdminStatRow]:
+    """Reyting: tasdiqlangan soni, keyin konversiya bo'yicha.
+
+    Faqat haqiqiy adminlarga tegishli qatorlar (admin_id=None — "biriktirilmagan"
+    qatori reytingga kirmaydi, u odam emas).
+    """
+    real = [r for r in report.rows if r.admin_id is not None]
+    return sorted(real, key=lambda r: (-r.passed, -(r.conversion_pct or 0), -r.cases))
+
+
+_MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def render_leaderboard(report: StatsReport, title: str) -> str:
+    rows = leaderboard(report)
+    lines = [f"🏆 <b>{title}</b>", ""]
+    if not rows or all(r.cases == 0 and r.checked == 0 for r in rows):
+        lines.append("<i>Bu davrda faoliyat bo'lmadi.</i>")
+        return "\n".join(lines)
+
+    for i, r in enumerate(rows):
+        medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+        conv = f"{r.conversion_pct}%" if r.conversion_pct is not None else "—"
+        lines.append(
+            f"{medal} <b>{r.admin_name}</b> — ✅{r.passed} tasdiq · "
+            f"{r.cases} nomer · konversiya {conv}"
+        )
+        if r.cases == 0 and r.checked == 0:
+            lines[-1] = f"{medal} <b>{r.admin_name}</b> — 💤 faoliyat yo'q"
+    return "\n".join(lines)
+
+
+def render_comparison(cmp: ComparisonReport, title: str) -> str:
+    """Umumiy ko'rinish + oldingi davr bilan solishtirish."""
+    t, p = cmp.current.totals, cmp.previous.totals
+    conv = f"{t.conversion_pct}%" if t.conversion_pct is not None else "—"
+    lines = [
+        f"📊 <b>{title}</b>  <i>(oldingi davrga nisbatan)</i>",
+        "",
+        f"Nomerlar: <b>{t.cases}</b>  {trend(t.cases, p.cases)}",
+        f"Partiyalar: <b>{t.batches}</b>  {trend(t.batches, p.batches)} "
+        f"(rasm: {t.images}, dublikat: {t.duplicates})",
+        f"Tekshiruv: <b>{t.checked}</b>  {trend(t.checked, p.checked)} "
+        f"(qo'lda {t.checks_manual} · avto {t.checks_auto})",
+        f"✅ O'tdi: <b>{t.passed}</b>  {trend(t.passed, p.passed)}",
+        f"❌ O'tmadi: <b>{t.failed}</b>  {trend(t.failed, p.failed)}",
+        f"Konversiya: <b>{conv}</b>",
+        f"O'rtacha nomer→rasm: {_fmt_avg(t.avg_number_to_batch_minutes)} · "
+        f"so'rov→javob: {_fmt_avg(t.avg_reply_minutes)}",
+    ]
+    if t.unknown or t.unreplied or t.awaiting_screenshot:
+        lines.append(
+            f"⚠️ Noaniq: {t.unknown} · ⏳ Javobsiz: {t.unreplied} · "
+            f"📷 Rasm kutilmoqda: {t.awaiting_screenshot}"
+        )
+    return "\n".join(lines)
+
+
+def render_admin_detail(
+    row: AdminStatRow, prev_row: AdminStatRow | None, title: str
+) -> str:
+    """Bitta hodimning batafsil kartochkasi."""
+    conv = f"{row.conversion_pct}%" if row.conversion_pct is not None else "—"
+
+    def tr(cur: int, attr: str) -> str:
+        return trend(cur, getattr(prev_row, attr)) if prev_row is not None else ""
+
+    lines = [
+        f"👤 <b>{row.admin_name}</b> — {title}",
+        "",
+        f"Qabul qilingan nomerlar: <b>{row.cases}</b>  {tr(row.cases, 'cases')}",
+        f"Rasm partiyalari: <b>{row.batches}</b> (jami {row.images} rasm)  "
+        f"{tr(row.batches, 'batches')}",
+        f"Tekshiruvlar: <b>{row.checked}</b> (qo'lda {row.checks_manual} · "
+        f"avto {row.checks_auto})",
+        f"✅ O'tdi: <b>{row.passed}</b>  {tr(row.passed, 'passed')}",
+        f"❌ O'tmadi: <b>{row.failed}</b>  {tr(row.failed, 'failed')}",
+        f"Konversiya: <b>{conv}</b>",
+        "",
+        f"⏱ O'rtacha nomer→rasm: {_fmt_avg(row.avg_number_to_batch_minutes)}",
+        f"⏱ O'rtacha so'rov→javob: {_fmt_avg(row.avg_reply_minutes)}",
+    ]
+    issues = []
+    if row.awaiting_screenshot:
+        issues.append(f"📷 rasm kutilmoqda: {row.awaiting_screenshot}")
+    if row.unreplied:
+        issues.append(f"⏳ javobsiz: {row.unreplied}")
+    if row.duplicates:
+        issues.append(f"♻️ dublikat: {row.duplicates}")
+    if row.unknown:
+        issues.append(f"⚠️ noaniq: {row.unknown}")
+    if row.late_corrected:
+        issues.append(f"🕰 kech to'g'irlangan: {row.late_corrected}")
+    if row.overrides:
+        issues.append(f"✍️ qo'lda override: {row.overrides}")
+    if issues:
+        lines += ["", "<b>E'tibor kerak:</b>", "  " + "\n  ".join(issues)]
+    if row.cases == 0 and row.checked == 0 and row.batches == 0:
+        lines += ["", "💤 <i>Bu davrda faoliyat qayd etilmagan.</i>"]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #

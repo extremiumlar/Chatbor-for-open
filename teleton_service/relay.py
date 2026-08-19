@@ -27,7 +27,8 @@ from core.models import Bot, Case, User
 from teleton_service.mock_bot import MockVerificationBot
 from teleton_service.real_bot_adapter import RealVerificationBotAdapter
 
-configure_logging("teleton")
+# DIQQAT: `configure_logging` `main()` ichida — T-16 ga qarang (modul
+# darajasida bo'lsa, testlar importda jonli log fayliga yozib yuborardi).
 log = logging.getLogger("relay")
 
 client = TelegramClient(settings.session_name, settings.api_id, settings.api_hash)
@@ -211,6 +212,9 @@ async def _force_release_watcher() -> None:
 
 
 async def main() -> None:
+    # T-16 — log sozlash faqat haqiqiy ishga tushishda (import paytida emas).
+    configure_logging("teleton")
+
     await init_db()
     async with get_session() as session:
         await ensure_bots_seeded(session, settings.bot_pool_usernames)

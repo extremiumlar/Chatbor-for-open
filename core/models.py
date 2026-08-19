@@ -61,6 +61,13 @@ class Admin(Base):
         SqlEnum(AdminRole, native_enum=False, length=16), default=AdminRole.ADMIN
     )
 
+    # Kim kimligini aniq ko'rsatish uchun: seed paytida `name` faqat raqamli
+    # tg_id bo'ladi ("6644467393"), bu esa ro'yxatda hech narsa anglatmaydi.
+    # Admin bot bilan har muloqotda bu maydonlar Telegram'dagi joriy ism va
+    # username bilan yangilanadi (`refresh_admin_identity`).
+    tg_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # TZ v2 4.2b — admin "nofaol" deb belgilansa uning ochiq case'lari
     # muzlatiladi va Telethon klienti ishga tushirilmaydi.
     is_active: Mapped[bool] = mapped_column(default=True)

@@ -67,9 +67,13 @@ from core.db import get_session, init_db
 from core.enums import PROBLEM_STATUSES, CaseStatus
 from core.logic.admins import (
     can_see_everything,
+    display_name,
     ensure_admins_seeded,
     get_admin_by_tg_id,
+    is_last_active_owner,
+    list_admin_sessions,
     list_admins,
+    refresh_admin_identity,
     set_admin_role,
 )
 from core.logic.audit import list_recent, log_action
@@ -103,6 +107,7 @@ from core.logic.case_admin import (
 from core.logic.case_search import search_cases
 from core.logic.customers import cases_for_user
 from core.logic.logging_setup import configure_logging
+from core.logic import permissions as perms
 from core.logic.phone import extract_phone
 from core.logic.check_patterns import (
     AmbiguousMatch,
@@ -130,8 +135,13 @@ from core.logic.settings_store import (
 )
 from core.logic.stats import gather_stats
 from core.logic.v2_stats import (
+    AdminStatRow,
     gather_v2_stats,
+    gather_with_comparison,
     next_daily_report_due_utc,
+    render_admin_detail,
+    render_comparison,
+    render_leaderboard,
     render_stats,
     tashkent_day_start_utc,
 )
@@ -147,8 +157,36 @@ from core.models import (
     User,
 )
 
-configure_logging("adminbot")
+# DIQQAT: `configure_logging` bu yerda EMAS, `main()` ichida chaqiriladi —
+# T-16 ga qarang. Modul darajasida chaqirilsa, testlar shu modulni import
+# qilishi bilanoq jonli `logs/adminbot.log` fayliga test uydirmalari
+# yozilib, haqiqiy xato izlashda chalg'itardi.
 log = logging.getLogger("adminbot")
+
+
+# Guruh ichida ATAYLAB ishlaydigan buyruqlar (qolganlari faqat lichkada —
+# aks holda nazorat guruhi "Tushunmadim" javoblari bilan to'lib ketadi).
+GROUP_ALLOWED_COMMANDS = frozenset({"setgroup", "help"})
+
+
+def should_handle_in_chat(chat_type: str, text: str | None) -> bool:
+    """Bot shu chatdagi shu xabarga umuman javob berishi kerakmi.
+
+    Lichkada — har doim (keyin oddiy handler'lar hal qiladi). Guruhda esa
+    FAQAT `GROUP_ALLOWED_COMMANDS` dagi buyruqlarga. Avval bunday cheklov
+    yo'q edi: nazorat guruhiga forward qilingan rasmlar va caption (ichida
+    nomer bor) botni ishga tushirib, arxiv guruhini "Tushunmadim" va
+    qidiruv natijalari bilan to'ldirardi — jonli sinovda har rasm
+    partiyasidan keyin 3 ta chiqindi xabar, kuniga ~140 ta
+    (TZ v2 5.2 — guruh toza arxiv bo'lishi kerak).
+    """
+    if chat_type not in ("group", "supergroup"):
+        return True
+    body = (text or "").strip()
+    if not body.startswith("/"):
+        return False
+    command = body[1:].split(maxsplit=1)[0].split("@")[0].lower()
+    return command in GROUP_ALLOWED_COMMANDS
 
 
 class IsAdmin(BaseFilter):
@@ -163,10 +201,27 @@ class IsAdmin(BaseFilter):
     async def __call__(self, message: Message) -> bool | dict:
         if message.from_user is None:
             return False
+
+        # Guruhda bot faqat ataylab guruh uchun mo'ljallangan buyruqlarga
+        # javob beradi (`should_handle_in_chat` izohiga qarang).
+        if not should_handle_in_chat(message.chat.type, message.text):
+            return False
+
         async with get_session() as session:
             admin = await get_admin_by_tg_id(session, message.from_user.id)
-        if admin is None:
-            return False
+            if admin is None:
+                return False
+            # `/setactive` bilan o'chirilgan admin botdan ham uzilishi kerak.
+            # Avval bu tekshirilmasdi — o'chirilgan odam hamma buyruqni bemalol
+            # ishlatishda davom etardi.
+            if not admin.is_active:
+                return False
+            # Kim kimligi ro'yxatlarda tushunarli bo'lishi uchun ism/username
+            # har muloqotda Telegram'dan yangilanadi (o'zgargan bo'lsagina
+            # yoziladi) — aks holda adminlar raqam bo'lib ko'rinaverardi.
+            u = message.from_user
+            full = " ".join(p for p in (u.first_name, u.last_name) if p) or None
+            await refresh_admin_identity(session, admin, full, u.username)
         return {"current_admin": admin}
 
 
@@ -198,6 +253,80 @@ class ResetStateOnMenuPress(BaseMiddleware):
 
 
 admin_router.message.outer_middleware(ResetStateOnMenuPress())
+
+
+class RolePermission(BaseMiddleware):
+    """TZ 14 — rolga to'g'ri kelmaydigan buyruq/tugma BAJARILMAYDI.
+
+    Nega middleware, nega har bir handler ichida emas: 26 buyruq va o'nlab
+    tugma bor — har biriga qo'lda tekshiruv yozilsa, bittasi esdan chiqadi va
+    jimgina teshik qoladi. Bu yerda esa hammasi bitta joydan o'tadi.
+
+    Nega tugmani yashirish yetarli emas: Telegram'da eski xabardagi tugma
+    keyin ham bosiladi, callback_data'ni qo'lda yuborish ham mumkin. Shuning
+    uchun ko'rsatish (menyu/yordam) va bajarish (shu tekshiruv) — ikkovi
+    alohida, lekin bitta `core.logic.permissions` jadvaliga tayanadi.
+
+    T-9 — XABARLAR uchun bu ICHKI (inner) middleware, callback'lar uchun esa
+    TASHQI (outer). Sabab aiogram'ning tartibida: tashqi middleware router
+    filtrlaridan OLDIN ishlaydi, ya'ni `IsAdmin` hali `current_admin`ni
+    in'ektsiya qilmagan bo'ladi — o'shanda bu tekshiruv `admin is None` deb
+    JIMGINA o'tkazib yuborardi va buyruqlar umuman tekshirilmasdi. Ichki
+    middleware filtrlardan KEYIN ishlaydi, demak `current_admin` joyida
+    bo'ladi. Callback'larda esa router filtri yo'q, shuning uchun u yerda
+    adminni middleware o'zi topadi (pastdagi shoxga qarang).
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        admin: Admin | None = data.get("current_admin")
+
+        if admin is None and isinstance(event, CallbackQuery) and event.from_user is not None:
+            # Callback'larda `IsAdmin` filtri ishlamaydi (u faqat message
+            # uchun) — shuning uchun adminni shu yerda topamiz va keyingi
+            # handler'lar ham foydalanishi uchun `data`ga qo'yamiz.
+            async with get_session() as session:
+                admin = await get_admin_by_tg_id(session, event.from_user.id)
+            if admin is None or not admin.is_active:
+                await event.answer("Sizda ruxsat yo'q.", show_alert=True)
+                return None
+            data["current_admin"] = admin
+
+        if admin is None:
+            # Xabarlarda bu yerga faqat `IsAdmin` o'tkazmagan holat kelishi
+            # mumkin emas (u o'tkazmasa handler ham chaqirilmaydi), lekin
+            # ehtiyot uchun: adminni aniqlay olmasak, ruxsat ham bera olmaymiz.
+            return await handler(event, data)
+
+        if isinstance(event, Message):
+            text = (event.text or "").strip()
+            if text.startswith("/"):
+                command = text[1:].split()[0].split("@")[0].lower()
+                if command in perms.COMMANDS and not perms.can_use_command(admin, command):
+                    await event.answer(perms.denial_message(admin, "/" + command))
+                    return None
+            elif text in perms.MENU_BUTTONS and not perms.can_use_menu_button(admin, text):
+                await event.answer(perms.denial_message(admin, text))
+                return None
+
+        elif isinstance(event, CallbackQuery) and event.data:
+            if not perms.can_use_callback(admin, event.data):
+                await event.answer(
+                    "⛔ Bu amal sizning rolingizga ochiq emas.", show_alert=True
+                )
+                return None
+
+        return await handler(event, data)
+
+
+# T-9 — xabarlar: ICHKI (filtrlardan keyin, `current_admin` bor);
+# callback'lar: TASHQI (router filtri yo'q, middleware o'zi topadi).
+admin_router.message.middleware(RolePermission())
+admin_router.callback_query.outer_middleware(RolePermission())
 
 
 async def _guard(callback: CallbackQuery) -> Admin | None:
@@ -240,18 +369,39 @@ async def _edit(callback: CallbackQuery, text: str, markup=None) -> None:
 
 
 @admin_router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
+async def cmd_start(message: Message, state: FSMContext, current_admin: Admin) -> None:
     await state.clear()
     await message.answer(
-        views.welcome(message.from_user.first_name if message.from_user else None),
-        reply_markup=kb.main_menu(),
+        views.welcome(message.from_user.first_name if message.from_user else None)
+        + f"\n\nRolingiz: {perms.role_label(current_admin.role)}",
+        reply_markup=kb.main_menu(current_admin),
     )
 
 
 @admin_router.message(Command("help"))
 @admin_router.message(F.text == kb.BTN_HELP)
-async def show_help(message: Message) -> None:
-    await message.answer(views.HELP_TEXT, reply_markup=kb.main_menu())
+async def show_help(message: Message, current_admin: Admin) -> None:
+    """Har kim FAQAT o'ziga ochiq buyruqlarni ko'radi (TZ 14, Q43).
+
+    Guruhda ham ishlaydi — ro'yxat tugmani bosgan odamning roliga qarab
+    tuziladi, ya'ni bitta guruhdagi ikki xil xodim ikki xil ro'yxat oladi.
+    """
+    in_group = message.chat.type in ("group", "supergroup")
+    await message.answer(
+        views.help_for_role(current_admin, in_group=in_group),
+        reply_markup=None if in_group else kb.main_menu(current_admin),
+    )
+
+
+@admin_router.message(Command("myrole"))
+async def show_my_role(message: Message, current_admin: Admin) -> None:
+    allowed = perms.allowed_commands(current_admin)
+    await message.answer(
+        f"👤 <b>{current_admin.name}</b>\n\n"
+        f"Rolingiz: {perms.role_label(current_admin.role)}\n"
+        f"Sizga ochiq buyruqlar: <b>{len(allowed)}</b> ta\n\n"
+        f"To'liq ro'yxat uchun /help yuboring."
+    )
 
 
 @admin_router.callback_query(F.data == "noop")
@@ -282,10 +432,15 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 @admin_router.message(Command("stats"))
 @admin_router.message(F.text == kb.BTN_STATS)
-async def show_stats(message: Message) -> None:
+async def show_stats(message: Message, current_admin: Admin) -> None:
+    # §8.4 — oddiy admin faqat o'zinikini ko'radi (`/vstats` va `/problems`
+    # allaqachon shunday; bu eski ekran ochiq qolib ketgan edi).
+    can_all = can_see_everything(current_admin)
     async with get_session() as session:
-        stats = await gather_stats(session)
-    await message.answer(views.stats_text(stats))
+        stats = await gather_stats(
+            session, viewer_admin_id=current_admin.id, can_see_all=can_all
+        )
+    await message.answer(views.stats_text(stats, own_only=not can_all))
 
 
 # --------------------------------------------------------------------------- #
@@ -1204,9 +1359,10 @@ async def cb_health(callback: CallbackQuery) -> None:
     async with get_session() as session:
         bots = await list_bots(session)
         missing = await missing_patterns(session)
+        shadow = await is_shadow_mode(session)
     await _edit(
         callback,
-        views.health_text(bots, missing, settings.use_real_verification_bots),
+        views.health_text(bots, missing, settings.use_real_verification_bots, shadow),
         kb.back_to("nav:settings", "⬅️ Sozlamalar"),
     )
     await callback.answer()
@@ -1411,22 +1567,64 @@ async def _set_via_command(message: Message, command: CommandObject, kind: str) 
     await message.answer(f"✅ <b>{key}</b> yangilandi:\n\n{value}")
 
 
-@admin_router.message(Command("admins"))
-async def cmd_admins(message: Message) -> None:
-    """Audit K-4/J-8 — ro'yxatdagi adminlar va ularning rollari (TZ 14)."""
+async def _admins_overview() -> tuple[str, InlineKeyboardMarkup]:
+    """Adminlar ro'yxati: kim, qaysi rolda, faolmi, bugun nima qildi.
+
+    Har qator tugma — bosilsa hodimning batafsil statistika kartochkasi
+    ochiladi (`vst:d:c:<id>` — statistika bo'limi bilan bitta mexanizm).
+    """
+    since_today = tashkent_day_start_utc(datetime.datetime.utcnow())
     async with get_session() as session:
         admins = await list_admins(session)
-    lines = [f"<code>{a.tg_user_id}</code> — <b>{a.role.value}</b> ({a.name})" for a in admins]
-    await message.answer("👥 <b>Adminlar</b>\n\n" + "\n".join(lines))
+        report = await gather_v2_stats(session, since_today)
+
+    by_id = {r.admin_id: r for r in report.rows}
+
+    lines = ["👥 <b>Adminlar</b> — kim kim ekani va bugungi holati\n"]
+    buttons = []
+    for a in sorted(admins, key=lambda x: (not x.is_active, x.id)):
+        r = by_id.get(a.id)
+        status = "🟢" if a.is_active else "🔴 nofaol"
+        today = (
+            f"bugun: {r.cases} nomer · ✅{r.passed}"
+            if r is not None and (r.cases or r.checked or r.batches)
+            else "bugun: 💤 faoliyat yo'q"
+        )
+        lines.append(
+            f"{status} <b>{display_name(a)}</b>\n"
+            f"    {perms.role_label(a.role)}\n"
+            f"    Telegram ID: <code>{a.tg_user_id}</code> · ichki #{a.id}\n"
+            f"    {today}"
+        )
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📊 {display_name(a)} statistikasi", callback_data=f"vst:d:c:{a.id}"
+            )
+        ])
+
+    lines.append(
+        "\n<i>Rol berish: <code>/setrole &lt;telegram_id&gt; &lt;ROL&gt;</code> · "
+        "O'chirish/yoqish: <code>/setactive &lt;telegram_id&gt; on|off</code></i>"
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@admin_router.message(Command("admins"))
+async def cmd_admins(message: Message) -> None:
+    """Audit K-4/J-8 — adminlar ro'yxati (TZ 14): rol izohi bilan, har biriga
+    statistika kartochkasiga o'tish tugmasi."""
+    text, markup = await _admins_overview()
+    await message.answer(text, reply_markup=markup)
 
 
 @admin_router.message(Command("setrole"))
 async def cmd_setrole(message: Message, command: CommandObject, current_admin: Admin) -> None:
     """Audit K-4/J-8 — faqat OWNER boshqa adminning rolini o'zgartira oladi
-    (TZ 14-bo'lim: Owner — hammasi)."""
-    if current_admin.role != AdminRole.OWNER:
-        await message.answer("Faqat Owner rol o'zgartira oladi.")
-        return
+    (TZ 14-bo'lim: Owner — hammasi).
+
+    T-9 — rol tekshiruvi bu yerda EMAS, `RolePermission` middleware'da
+    (`permissions.COMMANDS["setrole"]`). Ikkinchi nusxa saqlansa, ertami-kech
+    jadval bilan chetlashadi."""
     if not command.args or len(command.args.split()) != 2:
         roles = ", ".join(r.value for r in AdminRole)
         await message.answer(
@@ -1439,17 +1637,44 @@ async def cmd_setrole(message: Message, command: CommandObject, current_admin: A
     except ValueError:
         await message.answer(f"Noma'lum rol: {raw_role}")
         return
+    if not raw_tg_id.lstrip("-").isdigit():
+        # Avval bu yerda `int(raw_tg_id)` to'g'ridan-to'g'ri chaqirilardi va
+        # raqam bo'lmasa handler xato bilan yiqilardi (foydalanuvchiga hech
+        # qanday javob qaytmasdi).
+        await message.answer(
+            f"Telegram ID raqam bo'lishi kerak: <code>{raw_tg_id}</code>\n"
+            f"ID'larni /admins ro'yxatidan oling."
+        )
+        return
 
     async with get_session() as session:
         target = await get_admin_by_tg_id(session, int(raw_tg_id))
         if target is None:
             await message.answer("Bunday telegram_id bilan admin topilmadi (avval /admins bilan tekshiring).")
             return
+        # T-11 — yagona Owner pasaytirilsa, `ensure_owner_exists` keyingi
+        # ishga tushishda uni jimgina qaytarib ko'taradi. Buni OLDINDAN
+        # aytmasak, admin o'zini yangi rolda deb o'ylab yuradi (jonli sinovda
+        # aynan shunday bo'ldi).
+        oxirgi_owner = role != AdminRole.OWNER and await is_last_active_owner(
+            session, target.id
+        )
         updated = await set_admin_role(session, target.id, role)
         await log_action(
             session, message.from_user.id, "set_admin_role", f"admin #{updated.id} -> {role.value}"
         )
-    await message.answer(f"✅ <code>{raw_tg_id}</code> endi <b>{role.value}</b>.")
+
+    text = f"✅ <code>{raw_tg_id}</code> endi <b>{role.value}</b>."
+    if oxirgi_owner:
+        kim = "Siz" if target.tg_user_id == message.from_user.id else display_name(target)
+        text += (
+            f"\n\n⚠️ <b>{kim} tizimdagi YAGONA faol Owner edi.</b>\n"
+            f"Keyingi ishga tushishda tizim bu rolni avtomatik qaytaradi — "
+            f"aks holda hech kim rol bera olmay qoladi.\n"
+            f"To'g'ri tartib: avval boshqa odamni Owner qiling, keyin bu "
+            f"rolni pasaytiring."
+        )
+    await message.answer(text)
 
 
 @admin_router.message(Command("botpatterns"))
@@ -1473,17 +1698,18 @@ async def cmd_botpatterns(message: Message) -> None:
 async def cmd_setgroup(
     message: Message, command: CommandObject, current_admin: Admin
 ) -> None:
-    """Superadmin (OWNER/ROP) nazorat guruhini belgilaydi — TZ v2 5.2.
+    """Nazorat guruhini belgilaydi — TZ v2 5.2.
 
     Ikki usul:
     - GURUH ICHIDA `/setgroup` yozilsa — o'sha guruh belgilanadi (eng oson:
       botni guruhga qo'shib bitta buyruq).
     - Lichkada `/setgroup <chat_id>` — id qo'lda kiritiladi.
-    """
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop nazorat guruhini belgilay oladi.")
-        return
 
+    T-9 — kimga ochiqligi `permissions.COMMANDS["setgroup"]` da (Owner +
+    Dasturchi, TZ 14 "Dasturchi — texnik sozlash"). Avval bu yerda "faqat
+    Owner/Rop" deb yozilgan edi: Dasturchi buyruqni /help da ko'rar,
+    middleware o'tkazar, handler esa rad etardi.
+    """
     if message.chat.type in ("group", "supergroup"):
         chat_id = message.chat.id
     elif command.args:
@@ -1522,45 +1748,139 @@ async def cmd_setgroup(
 
 
 # --------------------------------------------------------------------------- #
-# TZ v2 8-bo'lim (B-5) — v2 statistika
+# TZ v2 8-bo'lim (B-5) — statistika bo'limi
+#
+# Tuzilishi: davr (Bugun/Kecha/Hafta/Oy/Hammasi) × ko'rinish (Umumiy /
+# Hodimlar / Reyting / hodim kartochkasi). Callback formati:
+#   vst:<davr>:<ko'rinish>[:<admin_id>]
+# Eski `vst:d` ko'rinishidagi callback'lar ham ishlaydi (eski xabarlardagi
+# tugmalar o'lik bo'lib qolmasligi uchun).
 # --------------------------------------------------------------------------- #
 
 _VSTATS_PERIODS = {
     "d": ("Bugun", 0),
+    "y": ("Kecha", 1),
     "w": ("Hafta (7 kun)", 6),
     "m": ("Oy (30 kun)", 29),
+    "a": ("Hammasi", 3650),
 }
 
 
-def _vstats_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Bugun", callback_data="vst:d"),
-                InlineKeyboardButton(text="Hafta", callback_data="vst:w"),
-                InlineKeyboardButton(text="Oy", callback_data="vst:m"),
-            ]
-        ]
-    )
-
-
-async def _build_vstats_text(current_admin: Admin, period: str) -> str:
+def _vstats_bounds(period: str) -> tuple[str, datetime.datetime, datetime.datetime | None]:
+    """(sarlavha, davr boshi, davr oxiri-yoki-None)."""
     title, days_back = _VSTATS_PERIODS.get(period, _VSTATS_PERIODS["d"])
-    since = tashkent_day_start_utc(datetime.datetime.utcnow(), days_back=days_back)
+    now = datetime.datetime.utcnow()
+    since = tashkent_day_start_utc(now, days_back=days_back)
+    # "Kecha" — yopiq oraliq: kecha 00:00 dan bugun 00:00 gacha.
+    until = tashkent_day_start_utc(now, days_back=0) if period == "y" else None
+    return title, since, until
 
+
+def _vstats_unrestricted(admin: Admin) -> bool:
     # TZ v2 8.4 — oddiy admin FAQAT o'zinikini ko'radi; OWNER/ROP va
     # can_view_all_stats belgilanganlar hammani ko'radi.
-    unrestricted = (
-        current_admin.role in (AdminRole.OWNER, AdminRole.ROP)
-        or current_admin.can_view_all_stats
-    )
-    filter_admin_id = None if unrestricted else current_admin.id
+    #
+    # T-9 izohi: bu ATAYLAB `permissions.py` ga ko'chirilmagan. U yerdagi
+    # jadval "kim bu buyruqni ISHLATA oladi" degan savolga javob beradi;
+    # bu yerdagi qoida esa "buyruq ichida QANCHA ma'lumot ko'rinadi" —
+    # boshqa savol. `/vstats` hamma rolga ochiq, faqat qamrovi har xil.
+    return admin.role in (AdminRole.OWNER, AdminRole.ROP) or admin.can_view_all_stats
+
+
+def _vstats_keyboard(period: str, view: str, unrestricted: bool) -> InlineKeyboardMarkup:
+    def pbtn(code: str, label: str) -> InlineKeyboardButton:
+        mark = "· " if code == period else ""
+        return InlineKeyboardButton(text=mark + label, callback_data=f"vst:{code}:{view}")
+
+    rows = [
+        [pbtn("d", "Bugun"), pbtn("y", "Kecha"), pbtn("w", "Hafta"),
+         pbtn("m", "Oy"), pbtn("a", "Hammasi")],
+    ]
+    if unrestricted:
+        def vbtn(code: str, label: str) -> InlineKeyboardButton:
+            mark = "· " if code == view else ""
+            return InlineKeyboardButton(text=mark + label, callback_data=f"vst:{period}:{code}")
+
+        rows.append([vbtn("t", "📈 Umumiy"), vbtn("h", "👥 Hodimlar"), vbtn("r", "🏆 Reyting")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _vstats_admin_list_keyboard(period: str, report) -> InlineKeyboardMarkup:
+    """Hodimlar ko'rinishi: har hodim — alohida tugma (kartochkaga kirish)."""
+    rows = []
+    for r in report.rows:
+        if r.admin_id is None:
+            continue
+        flag = "💤 " if (r.cases == 0 and r.checked == 0 and r.batches == 0) else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{flag}{r.admin_name} · {r.cases} nomer · ✅{r.passed}",
+                callback_data=f"vst:{period}:c:{r.admin_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Umumiy", callback_data=f"vst:{period}:t")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _build_vstats(
+    current_admin: Admin, period: str, view: str, target_admin_id: int | None = None
+) -> tuple[str, InlineKeyboardMarkup]:
+    title, since, until = _vstats_bounds(period)
+    unrestricted = _vstats_unrestricted(current_admin)
+
+    # Cheklangan admin faqat o'zini ko'radi — qaysi ko'rinish so'ralmasin.
+    if not unrestricted:
+        async with get_session() as session:
+            cmp = await gather_with_comparison(session, since, admin_id=current_admin.id)
+        own = next(
+            (r for r in cmp.current.rows if r.admin_id == current_admin.id), None
+        ) or AdminStatRow(admin_id=current_admin.id, admin_name=display_name(current_admin))
+        prev = next(
+            (r for r in cmp.previous.rows if r.admin_id == current_admin.id), None
+        )
+        text = render_admin_detail(own, prev, f"{title} (faqat sizniki)")
+        return text, _vstats_keyboard(period, "t", unrestricted=False)
 
     async with get_session() as session:
-        report = await gather_v2_stats(session, since, admin_id=filter_admin_id)
+        if view == "c" and target_admin_id is not None:
+            cmp = await gather_with_comparison(session, since, admin_id=target_admin_id)
+            row = next(
+                (r for r in cmp.current.rows if r.admin_id == target_admin_id), None
+            )
+            if row is None:
+                target = await session.get(Admin, target_admin_id)
+                row = AdminStatRow(
+                    admin_id=target_admin_id,
+                    admin_name=display_name(target) if target else f"#{target_admin_id}",
+                )
+            prev = next(
+                (r for r in cmp.previous.rows if r.admin_id == target_admin_id), None
+            )
+            text = render_admin_detail(row, prev, title)
+            kb_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⬅️ Hodimlar", callback_data=f"vst:{period}:h")
+            ]])
+            return text, kb_markup
 
-    scope = "" if unrestricted else " (faqat sizniki)"
-    return render_stats(report, f"v2 statistika — {title}{scope}")
+        if view == "h":
+            report = await gather_v2_stats(session, since, until_utc=until)
+            text = render_stats(report, f"Hodimlar kesimi — {title}")
+            return text, _vstats_admin_list_keyboard(period, report)
+
+        if view == "r":
+            report = await gather_v2_stats(session, since, until_utc=until)
+            text = render_leaderboard(report, f"Reyting — {title}")
+            return text, _vstats_keyboard(period, view, unrestricted=True)
+
+        # standart: umumiy + oldingi davr bilan solishtirish
+        if until is None:
+            cmp = await gather_with_comparison(session, since)
+            text = render_comparison(cmp, f"Statistika — {title}")
+        else:
+            # "Kecha" kabi yopiq oraliqda solishtirish o'rniga oddiy ko'rinish.
+            report = await gather_v2_stats(session, since, until_utc=until)
+            text = render_stats(report, f"Statistika — {title}")
+        return text, _vstats_keyboard(period, "t", unrestricted=True)
 
 
 @admin_router.message(Command("setactive"))
@@ -1573,10 +1893,9 @@ async def cmd_setactive(
     eslatmalar, avtomatik tekshiruvlar to'xtaydi — poller/drip is_active'ga
     qaraydi), Telethon klienti keyingi restart'da ishga tushirilmaydi, va
     superadminga ochiq case'lar ro'yxati ko'rsatiladi.
+
+    T-9 — ruxsat `permissions.COMMANDS["setactive"]` da (faqat Owner).
     """
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop admin holatini o'zgartira oladi.")
-        return
     parts = (command.args or "").split()
     if len(parts) != 2 or parts[1].lower() not in ("on", "off"):
         await message.answer(
@@ -1647,6 +1966,98 @@ async def cmd_setactive(
     await message.answer("\n".join(lines))
 
 
+@admin_router.message(Command("uyqu"))
+async def cmd_uyqu(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """Bot ishlab turgan KOMPYUTERNING uyqu rejimini boshqarish (superadmin).
+
+    Tizim uy kompyuterida sinovda ishlayotganda kerak: kompyuter uxlab qolsa
+    barcha jarayonlar to'xtaydi. `/uyqu off` — hech qachon uxlamaydi;
+    `/uyqu on [daqiqa]` — uyqu qaytariladi (standart 30 daqiqa).
+
+    Faqat Windows'da ishlaydi (powercfg); Linux VDS'da uyqu rejimi yo'q —
+    buyruq buni o'zi aytadi.
+
+    T-9 — ruxsat `permissions.COMMANDS["uyqu"]` da (Owner + Dasturchi:
+    bu texnik sozlash, TZ 14).
+    """
+    import platform
+
+    if platform.system() != "Windows":
+        await message.answer(
+            "Bu server Windows emas — bu yerda uyqu rejimi yo'q, "
+            "buyruq shart emas."
+        )
+        return
+
+    arg = (command.args or "").strip().lower()
+    parts = arg.split()
+    if not parts or parts[0] not in ("off", "on"):
+        await message.answer(
+            "Format:\n"
+            "<code>/uyqu off</code> — kompyuter hech qachon uxlamaydi "
+            "(sinov paytida shart)\n"
+            "<code>/uyqu on</code> — uyqu qaytariladi (30 daqiqa)\n"
+            "<code>/uyqu on 60</code> — uyqu qaytariladi (60 daqiqa)"
+        )
+        return
+
+    if parts[0] == "off":
+        minutes = 0
+    else:
+        minutes = 30
+        if len(parts) > 1 and parts[1].isdigit():
+            minutes = max(1, int(parts[1]))
+
+    async def _powercfg(*args: str) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            "powercfg", *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        return proc.returncode or 0
+
+    # AC (tokda) ham, DC (batareyada) ham — noutbuk tokdan uzilib qolsa ham
+    # jarayonlar uxlamasin.
+    codes = [
+        await _powercfg("/change", "standby-timeout-ac", str(minutes)),
+        await _powercfg("/change", "standby-timeout-dc", str(minutes)),
+        await _powercfg("/change", "hibernate-timeout-ac", str(minutes)),
+        await _powercfg("/change", "hibernate-timeout-dc", str(minutes)),
+    ]
+    if any(c != 0 for c in codes):
+        await message.answer(
+            "⚠️ powercfg qisman xato qaytardi — kompyuterda qo'lda tekshiring: "
+            "Sozlamalar → Tizim → Quvvat va uyqu."
+        )
+        return
+
+    async with get_session() as session:
+        await log_action(
+            session,
+            message.from_user.id,
+            "power_sleep",
+            "off" if minutes == 0 else f"on {minutes}min",
+        )
+
+    if minutes == 0:
+        await message.answer(
+            "🖥 ✅ Uyqu rejimi O'CHIRILDI — kompyuter endi uxlamaydi "
+            "(ekran o'chishi mumkin, bu jarayonlarga ta'sir qilmaydi).\n\n"
+            "⚠️ Eslatma: noutbuk QOPQOG'I yopilsa baribir uxlashi mumkin — "
+            "buni faqat qo'lda sozlash kerak: Boshqaruv paneli → Quvvat → "
+            "«Qopqoq yopilganda: hech narsa qilmaslik»."
+        )
+    else:
+        await message.answer(
+            f"🖥 💤 Uyqu rejimi QAYTARILDI — kompyuter {minutes} daqiqa "
+            f"tegilmasa uxlaydi.\n\n⚠️ Diqqat: kompyuter uxlasa TIZIM HAM "
+            f"TO'XTAYDI (mijozlar kuzatilmaydi). Sinov tugagandagina yoqing."
+        )
+
+
 @admin_router.message(Command("setreporttime"))
 async def cmd_setreporttime(
     message: Message, command: CommandObject, current_admin: Admin
@@ -1656,10 +2067,9 @@ async def cmd_setreporttime(
     MUHIM: shunchaki sozlamani yozish yetmaydi — ochiq DAILY_REPORT ishining
     `due_at`i ham yangi vaqtga ko'chiriladi, aks holda o'zgarish faqat
     KEYINGI hisobotdan keyin kuchga kirardi.
+
+    T-9 — ruxsat `permissions.COMMANDS["setreporttime"]` da (Owner + Rop).
     """
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop hisobot vaqtini o'zgartira oladi.")
-        return
     if not command.args:
         async with get_session() as session:
             current = await get_daily_report_time(session)
@@ -1704,8 +2114,8 @@ async def cmd_setreporttime(
 
 @admin_router.message(Command("vstats"))
 async def cmd_vstats(message: Message, current_admin: Admin) -> None:
-    text = await _build_vstats_text(current_admin, "d")
-    await message.answer(text, reply_markup=_vstats_keyboard())
+    text, markup = await _build_vstats(current_admin, "d", "t")
+    await message.answer(text, reply_markup=markup)
 
 
 @admin_router.callback_query(F.data.startswith("vst:"))
@@ -1713,9 +2123,15 @@ async def cb_vstats(callback: CallbackQuery) -> None:
     current_admin = await _guard(callback)
     if current_admin is None:
         return
-    period = callback.data.split(":", 1)[1]
-    text = await _build_vstats_text(current_admin, period)
-    await _edit(callback, text, _vstats_keyboard())
+
+    # Format: vst:<davr>[:<ko'rinish>[:<admin_id>]] — eski `vst:d` ham qabul.
+    parts = callback.data.split(":")
+    period = parts[1] if len(parts) > 1 else "d"
+    view = parts[2] if len(parts) > 2 else "t"
+    target_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
+
+    text, markup = await _build_vstats(current_admin, period, view, target_id)
+    await _edit(callback, text, markup)
     await callback.answer()
 
 
@@ -1746,14 +2162,43 @@ def _parse_check_category(raw: str) -> CheckCategory | None:
     return aliases.get(normalized)
 
 
+@admin_router.message(Command("sessions"))
+async def cmd_sessions(message: Message) -> None:
+    """TZ v2 4.3 — har admin akkauntining sessiya holati.
+
+    Rol tekshiruvi `RolePermission` middleware'da (`permissions.COMMANDS`
+    jadvalidagi "sessions" yozuvi) — bu yerda takrorlanmaydi.
+    """
+    text = await _sessions_text()
+    await message.answer(text)
+
+
+async def _sessions_text() -> str:
+    """Buyruq ham, "⚙️ Sozlamalar → 🔌 Sessiyalar" tugmasi ham shu matnni
+    ko'rsatadi — ikki joyda ikki xil ko'rinish bo'lib qolmasligi uchun."""
+    async with get_session() as session:
+        rows = await list_admin_sessions(session)
+    if not rows:
+        return views.SESSIONS_EMPTY_TEXT
+    return views.sessions_text(rows)
+
+
+@admin_router.callback_query(F.data == "nav:sessions")
+async def cb_sessions(callback: CallbackQuery) -> None:
+    if not await _guard(callback):
+        return
+    await _edit(callback, await _sessions_text(), kb.back_to("nav:settings", "⬅️ Sozlamalar"))
+    await callback.answer()
+
+
 @admin_router.message(Command("setchecker"))
 async def cmd_setchecker(
     message: Message, command: CommandObject, current_admin: Admin
 ) -> None:
-    """TZ v2 6.3 — tekshiruvchi lichkani belgilash (username yoki raqamli id)."""
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop tekshiruvchini belgilay oladi.")
-        return
+    """TZ v2 6.3 — tekshiruvchi lichkani belgilash (username yoki raqamli id).
+
+    T-9 — ruxsat `permissions.COMMANDS["setchecker"]` da (Owner + Dasturchi).
+    """
     if not command.args:
         async with get_session() as session:
             current = await get_checker_account(session)
@@ -1768,7 +2213,39 @@ async def cmd_setchecker(
     async with get_session() as session:
         await set_checker_account(session, value)
         await log_action(session, message.from_user.id, "set_checker", value)
-    await message.answer(f"✅ Tekshiruvchi belgilandi: <code>{value}</code>")
+        # Tekshiruvchi ayni vaqtda kuzatilayotgan admin ham bo'lsa, unga
+        # ketgan HAR BIR so'rov o'sha akkauntning o'z relay klienti tomonidan
+        # qayta o'qiladi. Relay endi buni e'tiborsiz qoldiradi (T-5), lekin
+        # konfiguratsiyaning o'zi baribir chalkash — shuning uchun ogohlantirish.
+        clash = await _checker_is_watched_admin(session, value)
+
+    text = f"✅ Tekshiruvchi belgilandi: <code>{value}</code>"
+    if clash is not None:
+        text += (
+            f"\n\n⚠️ <b>DIQQAT:</b> bu akkaunt ayni vaqtda kuzatilayotgan "
+            f"admin hamdir ({display_name(clash)}).\n"
+            f"Tavsiya: tekshiruvchi uchun ALOHIDA akkaunt ishlating — aks "
+            f"holda unga ketgan so'rovlar o'sha akkauntning o'z klienti "
+            f"tomonidan qayta o'qiladi."
+        )
+    await message.answer(text)
+
+
+async def _checker_is_watched_admin(session, value: str) -> Admin | None:
+    """Tekshiruvchi sifatida ko'rsatilgan qiymat kuzatilayotgan adminmi.
+
+    `value` ham `@username`, ham raqamli id bo'lishi mumkin — ikkovini ham
+    tekshiramiz.
+    """
+    needle = value.strip().lstrip("@").lower()
+    for admin in await list_admins(session):
+        if not admin.is_active:
+            continue
+        if needle == str(admin.tg_user_id):
+            return admin
+        if admin.tg_username and needle == admin.tg_username.lower():
+            return admin
+    return None
 
 
 @admin_router.message(Command("checkpatterns"))
@@ -1802,9 +2279,7 @@ async def cmd_addcheckpattern(
 ) -> None:
     # Audit — TZ v2 §10: sozlash huquqi superadminda. Shablonlar mijozga
     # ketadigan natijani belgilaydi — oddiy admin o'zgartira olmasligi kerak.
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop shablon qo'sha oladi.")
-        return
+    # T-9 — tekshiruvning o'zi `permissions.COMMANDS["addcheckpattern"]` da.
     parts = (command.args or "").split(maxsplit=1)
     category = _parse_check_category(parts[0]) if parts else None
     if category is None or len(parts) < 2:
@@ -1832,9 +2307,7 @@ async def cmd_addcheckpattern(
 async def cmd_delcheckpattern(
     message: Message, command: CommandObject, current_admin: Admin
 ) -> None:
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop shablon o'chira oladi.")
-        return
+    # T-9 — ruxsat `permissions.COMMANDS["delcheckpattern"]` da.
     parts = (command.args or "").split()
     category = _parse_check_category(parts[0]) if parts else None
     if category is None or len(parts) != 2 or not parts[1].isdigit():
@@ -1884,17 +2357,58 @@ async def cmd_testcheck(message: Message, command: CommandObject) -> None:
 
 
 @admin_router.message(Command("shadow"))
-async def cmd_shadow(message: Message, current_admin: Admin) -> None:
-    """TZ v2 6.4.6 — soya rejimi almashtirgichi (standart: YOQILGAN)."""
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await message.answer("Faqat Owner/Rop soya rejimini almashtira oladi.")
-        return
+async def cmd_shadow(
+    message: Message, command: CommandObject, current_admin: Admin
+) -> None:
+    """TZ v2 6.4.6 — soya rejimi.
+
+    ARGUMENTSIZ `/shadow` faqat HOLATNI ko'rsatadi. Avval u rejimni
+    almashtirardi — jonli sinovda admin holatni bilmoqchi bo'lib yozgan
+    buyruq xavfsizlik tormozini jimgina ochib yubordi (2 marta sodir
+    bo'ldi). O'zgartirish endi faqat aniq `on`/`off` argumenti bilan
+    (`/setreporttime` bilan bir xil mantiq: argumentsiz — ko'rsatadi,
+    argument bilan — o'zgartiradi).
+    """
     async with get_session() as session:
-        new_value = not await is_shadow_mode(session)
+        current = await is_shadow_mode(session)
+
+    arg = (command.args or "").strip().lower()
+
+    if not arg:
+        holat = (
+            "🕶 <b>YOQILGAN</b> — mijozga hech narsa yozilmaydi."
+            if current
+            else "🟢 <b>O'CHIRILGAN</b> — natijalar mijozlarga yetkaziladi."
+        )
+        await message.answer(
+            f"Soya rejimi: {holat}\n\n"
+            f"O'zgartirish: <code>/shadow on</code> yoki <code>/shadow off</code>"
+        )
+        return
+
+    if arg not in ("on", "off"):
+        await message.answer(
+            "Format: <code>/shadow on</code> yoki <code>/shadow off</code>\n"
+            "(argumentsiz <code>/shadow</code> — joriy holatni ko'rsatadi)"
+        )
+        return
+
+    # T-9 — rol tekshiruvi `permissions.COMMANDS["shadow"]` da (Owner +
+    # Dasturchi); bu yerdagi nusxa olib tashlandi.
+    new_value = arg == "on"
+    if new_value == current:
+        await message.answer(
+            f"Soya rejimi allaqachon <b>{'YOQILGAN' if current else 'OCHIQ'}</b> — "
+            f"o'zgarish kerak emas."
+        )
+        return
+
+    async with get_session() as session:
         await set_shadow_mode(session, new_value)
         await log_action(
             session, message.from_user.id, "shadow_mode", "on" if new_value else "off"
         )
+
     if new_value:
         await message.answer(
             "🕶 Soya rejimi <b>YOQILDI</b> — tizim taniydi, bazaga yozadi, "
@@ -1903,7 +2417,10 @@ async def cmd_shadow(message: Message, current_admin: Admin) -> None:
     else:
         await message.answer(
             "🟢 Soya rejimi <b>O'CHIRILDI</b> — natijalar endi mijozlarga "
-            "yetkaziladi (B-4 oqimi bo'yicha)."
+            "yetkaziladi.\n\n"
+            "⚠️ Tanish shablonlari to'liq ekaniga ishonch hosil qiling "
+            "(<code>/checkpatterns</code>) — noto'g'ri tanilgan javob endi "
+            "to'g'ridan-to'g'ri mijozga ketadi."
         )
 
 
@@ -2018,11 +2535,7 @@ async def cb_unrecognized_classify(callback: CallbackQuery) -> None:
     if current_admin is None:
         return
     # Audit — tugma ham shablonga yozadi: superadmin huquqi (TZ v2 §10).
-    if current_admin.role not in (AdminRole.OWNER, AdminRole.ROP):
-        await callback.answer(
-            "Faqat Owner/Rop shablon qo'sha oladi.", show_alert=True
-        )
-        return
+    # T-9 — tekshiruvni `RolePermission` bajaradi (`CALLBACKS["ucp"]`).
     _, raw_id, raw_cat = callback.data.split(":")
     category = _parse_check_category(raw_cat)
     async with get_session() as session:
@@ -2059,11 +2572,11 @@ async def cb_unrecognized_classify(callback: CallbackQuery) -> None:
 
 
 @admin_router.message()
-async def on_unknown(message: Message) -> None:
+async def on_unknown(message: Message, current_admin: Admin) -> None:
     await message.answer(
         "Tushunmadim 🤔\n\nPastdagi menyudan bo'limni tanlang, yoki qidirish "
         "uchun nomerni yuboring.",
-        reply_markup=kb.main_menu(),
+        reply_markup=kb.main_menu(current_admin),
     )
 
 
@@ -2083,6 +2596,10 @@ async def cb_denied(callback: CallbackQuery) -> None:
 
 
 async def main() -> None:
+    # T-16 — log sozlash aynan shu yerda (modul darajasida emas): faqat
+    # xizmat HAQIQATAN ishga tushganda jonli log fayli ochiladi.
+    configure_logging("adminbot")
+
     bot = Bot(
         token=settings.adminbot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),

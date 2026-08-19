@@ -89,6 +89,7 @@ fonda kuzatib, qora ishlarni o'zi qiladi. Sizdan faqat 3 narsa:
 | `/shadow` | Soya rejimini yoqish/o'chirish |
 | `/setactive <tg_id> on\|off` | Adminni faol/nofaol qilish |
 | `/setreporttime HH:MM` | Kunlik hisobot vaqtini o'zgartirish (Toshkent) |
+| `/uyqu off\|on [daqiqa]` | Bot ishlab turgan kompyuterning uyqu rejimi (sinov davrida; faqat Windows) |
 | `/setrole <tg_id> <ROL>` | Rol berish (faqat OWNER) |
 | `/admins` | Adminlar ro'yxati |
 | `/vstats` | To'liq statistika (hamma admin kesimida) |

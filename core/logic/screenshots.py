@@ -11,6 +11,7 @@ import json
 import logging
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from html import escape
 from typing import Awaitable, Callable
 
 from sqlalchemy import select
@@ -104,10 +105,10 @@ class ScreenshotFlow:
 
             now = datetime.datetime.utcnow()
 
-            # §5.4 — dublikat: shu nomer uchun AVVAL ham partiya tashlanganmi
-            # (case'idan qat'i nazar — boshqa admin boshqa case ochgan
-            # bo'lishi mumkin).
-            prev = await self._find_previous_batch(session, case.phone)
+            # §5.4 — dublikat: shu nomer uchun BOSHQA case'da avval ham
+            # partiya tashlanganmi. Aynan shu case'ga qo'shimcha rasm tashlash
+            # dublikat emas (§6.1a — normal holat, taymer qayta hisoblanadi).
+            prev = await self._find_previous_batch(session, case.phone, case.id)
 
             batch = ScreenshotBatch(
                 case_id=case.id,
@@ -157,15 +158,53 @@ class ScreenshotFlow:
             )
 
             if prev is not None:
+                # Sabab ikki xil bo'lishi mumkin va ular teng emas: bittasi —
+                # ikki adminning to'qnashuvi (darhol hal qilinishi kerak),
+                # ikkinchisi — o'sha adminning bir nomerni ikki marta
+                # kiritgani. Avval ikkovi ham "ikki admin ishlayapti" deb
+                # xabar qilinardi.
+                prev_admin = await session.get(Admin, prev.admin_id)
+                prev_nomi = prev_admin.name if prev_admin else f"admin_id={prev.admin_id}"
+                prev_case = await session.get(Case, prev.case_id)
+                prev_code = (prev_case.short_code or prev_case.id) if prev_case else "?"
+                if prev.admin_id == admin_id:
+                    sabab = (
+                        f"O'SHA admin ({admin_name}) bu nomer uchun boshqa "
+                        f"case'da ({prev_code}) ham rasm tashlagan — ikki marta "
+                        f"kiritilgan bo'lishi mumkin."
+                    )
+                else:
+                    sabab = (
+                        f"IKKI ADMIN bitta mijoz ustida ishlayapti: "
+                        f"{prev_nomi} ({prev_code}) va {admin_name}."
+                    )
                 await self.alert_sink(
-                    f"⚠️ DUBLIKAT: {format_phone_pretty(case.phone)} uchun avval ham "
-                    f"rasm tashlangan (partiya #{prev.id}, admin_id={prev.admin_id}). "
-                    f"Yangi partiya: {case.short_code or case.id} (admin: {admin_name}). "
-                    f"Ikki admin bitta mijoz ustida ishlayotgan bo'lishi mumkin.",
+                    f"⚠️ DUBLIKAT: {format_phone_pretty(case.phone)} — "
+                    f"avvalgi partiya #{prev.id}, yangi partiya "
+                    f"{case.short_code or case.id}. {sabab}",
                     True,
                 )
 
-            customer_text = await get_template(session, "SCREENSHOT_FOLLOWUP")
+            # §5.3 matni case boshiga BIR MARTA yuboriladi. Admin rasmni
+            # qayta tashlashi normal holat (§6.1a), lekin mijoz uchun bir xil
+            # matnni qayta-qayta olish spam bo'ladi — jonli sinovda 3 partiya
+            # ketma-ket tashlanganda mijoz "tekshirish jarayonida..." matnini
+            # 3 marta oldi.
+            oldingi_partiya = (
+                await session.execute(
+                    select(ScreenshotBatch.id)
+                    .where(
+                        ScreenshotBatch.case_id == case.id,
+                        ScreenshotBatch.id != batch.id,
+                    )
+                    .limit(1)
+                )
+            ).scalars().first()
+            customer_text = (
+                None
+                if oldingi_partiya is not None
+                else await get_template(session, "SCREENSHOT_FOLLOWUP")
+            )
 
             log.info(
                 "Partiya #%s qayd etildi: case=%s, admin=%s, rasm=%s, dublikat=%s.",
@@ -210,10 +249,24 @@ class ScreenshotFlow:
             return None
         return case
 
-    async def _find_previous_batch(self, session, phone: str) -> ScreenshotBatch | None:
+    async def _find_previous_batch(
+        self, session, phone: str, exclude_case_id: int
+    ) -> ScreenshotBatch | None:
+        """§5.4 — dublikat = shu nomer uchun BOSHQA case'da tashlangan partiya.
+
+        O'sha case'ning o'ziga qayta rasm tashlash dublikat EMAS: §6.1a buni
+        normal holat deb belgilaydi ("admin rasmni ikkinchi marta tashlasa —
+        taymer oxirgi rasm vaqtidan qayta hisoblanadi"). Avval bu ajratilmagani
+        uchun har qayta tashlashda superadminga "ikki admin bitta mijoz ustida
+        ishlayapti" degan noto'g'ri alert ketardi va caption o'z case'iga
+        havola qilib "avval ham tashlangan" deb yozardi.
+        """
         result = await session.execute(
             select(ScreenshotBatch)
-            .where(ScreenshotBatch.phone == phone)
+            .where(
+                ScreenshotBatch.phone == phone,
+                ScreenshotBatch.case_id != exclude_case_id,
+            )
             .order_by(ScreenshotBatch.id.desc())
         )
         return result.scalars().first()
@@ -252,20 +305,29 @@ class ScreenshotFlow:
         check_due_at: datetime.datetime | None,
         prev: ScreenshotBatch | None,
     ) -> str:
-        """TZ v2 5.2 dagi tasdiqlangan format."""
+        """TZ v2 5.2 dagi tasdiqlangan format.
+
+        Caption HTML rejimida yuboriladi (`manual_relay`da `parse_mode="html"`)
+        — shuning uchun ichidagi HAR QANDAY foydalanuvchi matni (mijoz ismi,
+        username, admin ismi) `html.escape` bilan ekranlanadi. Aks holda
+        ismida `<` yoki `&` bo'lgan mijoz butun caption'ni buzardi.
+        """
         local_now = to_tashkent(now)
+        # TZ v2 5.2 — mijozga BOSILADIGAN havola (`tg://user?id=`). Avval
+        # oddiy matn edi: username'i yo'q mijozga nazorat guruhidan o'tishning
+        # iloji yo'q edi ("id:6644467393" bosilmaydi).
+        ism = user.display_name or (
+            f"@{user.tg_username}" if user.tg_username else "mijoz"
+        )
+        havola = f'<a href="tg://user?id={user.tg_user_id}">{escape(ism)}</a>'
         customer = (
-            f"@{user.tg_username} ({user.display_name})"
-            if user.tg_username and user.display_name
-            else f"@{user.tg_username}"
-            if user.tg_username
-            else user.display_name or f"id:{user.tg_user_id}"
+            f"{havola} (@{escape(user.tg_username)})" if user.tg_username else havola
         )
         lines = [
             f"📸 #{case.short_code or case.id}",
             f"👤 {customer}",
             f"📱 {format_phone_pretty(case.phone)}",
-            f"🧑‍💼 Admin: {admin_name}",
+            f"🧑‍💼 Admin: {escape(admin_name)}",
             f"🕐 {local_now:%H:%M · %d.%m.%Y}",
         ]
         if check_due_at is not None:
@@ -276,7 +338,7 @@ class ScreenshotFlow:
             prev_code = (prev_case.short_code or prev_case.id) if prev_case else "?"
             lines.append(
                 f"⚠️ Bu nomer uchun avval ham rasm tashlangan — #{prev_code} "
-                f"(Admin: {prev_admin.name if prev_admin else '?'}, "
+                f"(Admin: {escape(prev_admin.name) if prev_admin else '?'}, "
                 f"{to_tashkent(prev.sent_at):%H:%M})"
             )
         return "\n".join(lines)

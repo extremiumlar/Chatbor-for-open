@@ -145,7 +145,7 @@ async def assign_customer(session: AsyncSession, user_id: int, admin_id: int | N
     return user
 
 
-def _visible_to(stmt, viewer_admin_id: int, can_see_all: bool):
+def visible_to(stmt, viewer_admin_id: int, can_see_all: bool):
     """`users`ga JOIN qilingan so'rovga ko'rish-cheklash sharti qo'shadi.
 
     `can_see_all=True` (Owner/Rop) bo'lsa hech narsa cheklamaydi. Aks holda
@@ -196,7 +196,7 @@ async def list_cases_by_statuses(
     stmt = select(Case).where(Case.status.in_(statuses))
     if not can_see_all:
         stmt = stmt.join(User, Case.user_id == User.id)
-        stmt = _visible_to(stmt, viewer_admin_id, can_see_all)
+        stmt = visible_to(stmt, viewer_admin_id, can_see_all)
     stmt = stmt.order_by(Case.id.desc()).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars().all())
