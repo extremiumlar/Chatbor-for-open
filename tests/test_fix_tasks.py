@@ -750,3 +750,78 @@ def test_t16_importing_the_bot_creates_no_log_file(tmp_path):
 
     assert natija.returncode == 0, natija.stderr
     assert list(tmp_path.glob("*.log")) == [], "import paytida log fayli yaratildi"
+
+
+# --------------------------------------------------------------------------- #
+# K-3 — soya rejimi o'chirilayotganda shablonlar holati aniq aytilsin
+#
+# Bu topilma "kod emas, SOZLAMA" deb belgilangan (shablonlar mazmunini faqat
+# foydalanuvchi biladi), lekin xavf aynan `/shadow off` lahzasida yuz beradi:
+# shablonlar to'liq bo'lmasa, "bazada bor emas" javobi O'TDI deb o'qilib,
+# ovozi o'tmagan mijozga "tasdiqlandi" yoziladi. Buyruq endi qaysi
+# kategoriya bo'shligini nomma-nom aytadi (bloklamaydi — bu superadmin
+# qarori).
+# --------------------------------------------------------------------------- #
+
+
+async def test_k3_shadow_off_names_the_empty_pattern_categories(shadow_env, session_factory):
+    """Hech qanday shablon kiritilmagan holat — eng xavflisi."""
+    async with session_factory() as session:
+        await set_shadow_mode(session, True)
+
+    value, said = await shadow_env("off")
+
+    assert value is False  # o'chirish bloklanmaydi
+    matn = said[0]
+    assert "birorta ham shablon yo'q" in matn
+    assert "CHECK_PASSED" in matn and "CHECK_FAILED" in matn and "CHECK_ERROR" in matn
+    # Xavfning O'ZI tushuntirilsin, quruq ogohlantirish emas.
+    assert "bazada bor emas" in matn
+
+
+async def test_k3_shadow_off_is_calm_when_all_categories_are_filled(
+    shadow_env, session_factory
+):
+    """Shablonlar bor bo'lsa vahima qilinmasin — aks holda ogohlantirish
+    ma'nosini yo'qotadi va e'tibordan qoladi."""
+    from core.logic.check_patterns import CheckCategory, add_pattern
+
+    async with session_factory() as session:
+        await set_shadow_mode(session, True)
+        await add_pattern(session, CheckCategory.CHECK_PASSED, "o'tdi")
+        await add_pattern(session, CheckCategory.CHECK_FAILED, "o'tmadi")
+        await add_pattern(session, CheckCategory.CHECK_ERROR, "xato")
+
+    value, said = await shadow_env("off")
+
+    assert value is False
+    assert "birorta ham shablon yo'q" not in said[0]
+    assert "Uchala kategoriyada shablon bor" in said[0]
+
+
+async def test_k3_partial_patterns_still_warn(shadow_env, session_factory):
+    """Jonli sinovdagi aniq holat: PASSED to'ldirilgan, FAILED esa amalda
+    ishlamaydi — shunda ham ogohlantirish chiqishi kerak."""
+    from core.logic.check_patterns import CheckCategory, add_pattern
+
+    async with session_factory() as session:
+        await set_shadow_mode(session, True)
+        await add_pattern(session, CheckCategory.CHECK_PASSED, "bor")
+
+    value, said = await shadow_env("off")
+
+    assert value is False
+    assert "birorta ham shablon yo'q" in said[0]
+    assert "CHECK_FAILED" in said[0]
+    assert "CHECK_PASSED" not in said[0]  # bu kategoriya to'ldirilgan
+
+
+async def test_k3_shadow_on_does_not_warn(shadow_env, session_factory):
+    """Soya rejimini YOQISH xavfsiz amal — ogohlantirish o'rinsiz."""
+    async with session_factory() as session:
+        await set_shadow_mode(session, False)
+
+    value, said = await shadow_env("on")
+
+    assert value is True
+    assert "shablon" not in said[0]

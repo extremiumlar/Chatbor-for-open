@@ -115,6 +115,7 @@ from core.logic.check_patterns import (
     add_pattern,
     classify,
     get_all_patterns,
+    missing_categories,
     remove_pattern,
 )
 from core.logic.settings_store import (
@@ -2408,20 +2409,48 @@ async def cmd_shadow(
         await log_action(
             session, message.from_user.id, "shadow_mode", "on" if new_value else "off"
         )
+        # Soya rejimi o'chirilganda tanish shablonlari holatini ANIQ aytamiz.
+        # Jonli sinovda (K-3) shablonlar to'liq emasligi sababli salbiy javob
+        # "O'TDI" deb tanilgan edi; soya rejimi o'chgan zahoti bunday xato
+        # to'g'ridan-to'g'ri mijozga ketadi. Avval bu yerda faqat umumiy
+        # "ishonch hosil qiling" eslatmasi bor edi — endi qaysi kategoriya
+        # bo'shligi nomma-nom ko'rsatiladi.
+        bosh_kategoriyalar = [] if new_value else await missing_categories(session)
 
     if new_value:
         await message.answer(
             "🕶 Soya rejimi <b>YOQILDI</b> — tizim taniydi, bazaga yozadi, "
             "lekin mijozga HECH NARSA yozmaydi."
         )
-    else:
-        await message.answer(
-            "🟢 Soya rejimi <b>O'CHIRILDI</b> — natijalar endi mijozlarga "
-            "yetkaziladi.\n\n"
-            "⚠️ Tanish shablonlari to'liq ekaniga ishonch hosil qiling "
-            "(<code>/checkpatterns</code>) — noto'g'ri tanilgan javob endi "
-            "to'g'ridan-to'g'ri mijozga ketadi."
+        return
+
+    matn = (
+        "🟢 Soya rejimi <b>O'CHIRILDI</b> — natijalar endi mijozlarga "
+        "yetkaziladi.\n\n"
+    )
+    if bosh_kategoriyalar:
+        royxat = "\n".join(
+            f"  • {_CHECK_CATEGORY_LABELS[c]} (<code>{c.value}</code>)"
+            for c in bosh_kategoriyalar
         )
+        matn += (
+            f"🚨 <b>DIQQAT: quyidagi kategoriyada birorta ham shablon yo'q:</b>\n"
+            f"{royxat}\n\n"
+            f"Bu holatda tekshiruvchining javobi noto'g'ri tanilishi mumkin — "
+            f"masalan \"bazada bor emas\" javobi <b>O'TDI</b> deb o'qilib, "
+            f"ovozi o'tmagan mijozga \"tasdiqlandi\" deb yoziladi.\n\n"
+            f"Tavsiya: <code>/shadow on</code> bilan qaytaring, so'ng "
+            f"<code>/addcheckpattern</code> bilan to'ldiring va "
+            f"<code>/testcheck &lt;matn&gt;</code> bilan sinab ko'ring."
+        )
+    else:
+        matn += (
+            "Uchala kategoriyada shablon bor. Baribir "
+            "<code>/testcheck &lt;matn&gt;</code> bilan tekshiruvchi yozadigan "
+            "haqiqiy variantlarni sinab ko'ring — noto'g'ri tanilgan javob "
+            "endi to'g'ridan-to'g'ri mijozga ketadi."
+        )
+    await message.answer(matn)
 
 
 @admin_router.message(Command("unrecognized"))
