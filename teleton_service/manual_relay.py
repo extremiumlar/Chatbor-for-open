@@ -31,6 +31,7 @@ from core.logic.notifier import AdminNotifier
 from core.logic.phone import extract_phone
 from core.logic.check_engine import CheckEngine
 from core.logic.job_poller import JobPoller
+from core.logic.supervisor import spawn_supervised
 from core.logic.result_flow import REACTION_BY_OUTCOME, ResultDistributor
 from core.logic.screenshots import ScreenshotFlow, to_tashkent
 from core.logic.v2_stats import (
@@ -675,19 +676,26 @@ async def main() -> None:
             important=False,
         )
 
+    # Har fon sikli KUZATUV ostida ko'tariladi (`core.logic.supervisor`).
+    # Avval ular oddiy `create_task` edi: sikl xato bilan tugasa, natijasi
+    # hech qachon o'qilmagani va ro'yxat havolani ushlab turgani uchun
+    # Python ham jim qolardi. Jonli sinovda poller shu yo'l bilan o'lgan —
+    # jarayon tirik, xizmat sog'lomdek, lekin taymerlar to'xtagan edi.
     background_tasks = [
-        asyncio.create_task(multi.health_loop()),
+        spawn_supervised("health_loop", lambda: multi.health_loop(), notifier.send),
         # B-3 — taymerlar bazadan (restart'dan omon), drip navbat.
-        asyncio.create_task(job_poller.run_loop()),
-        asyncio.create_task(_drip_loop()),
-        asyncio.create_task(
-            daily_backup_loop(
+        spawn_supervised("job_poller", lambda: job_poller.run_loop(), notifier.send),
+        spawn_supervised("drip_loop", _drip_loop, notifier.send),
+        spawn_supervised(
+            "daily_backup",
+            lambda: daily_backup_loop(
                 settings.database_url,
                 settings.backup_dir,
                 settings.backup_interval_seconds,
                 settings.backup_retention,
                 alert_sink=notifier.send,
-            )
+            ),
+            notifier.send,
         ),
     ]
     try:

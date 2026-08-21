@@ -13,6 +13,7 @@ from core.db import get_session, init_db
 from core.enums import CaseStatus
 from core.logic.admins import ensure_admins_seeded
 from core.logic.backup import daily_backup_loop
+from core.logic.supervisor import spawn_supervised
 from core.logic.bot_pool import ensure_bots_seeded
 from core.logic.bot_patterns import missing_patterns
 from core.logic.case_manager import CaseManager
@@ -249,18 +250,27 @@ async def main() -> None:
     # TZ 12-bo'lim (Q37) — qayta ishga tushganda yarim qolgan case'larni ko'rib chiqish.
     await reconcile_after_restart(case_manager, get_session, notifier.send, _notify_customer)
 
+    # Fon sikllari kuzatuv ostida — `manual_relay`dagi bilan bir xil sabab
+    # (`core.logic.supervisor` izohiga qarang): kuzatuvsiz sikl xato bilan
+    # o'lsa, hech qayerda iz qolmaydi va nazoratchilar jimgina to'xtaydi.
     background_tasks = [
-        asyncio.create_task(_suspicious_resume_watcher()),
-        asyncio.create_task(_admin_redispatch_watcher()),
-        asyncio.create_task(_force_release_watcher()),
-        asyncio.create_task(
-            daily_backup_loop(
+        spawn_supervised(
+            "suspicious_resume_watcher", _suspicious_resume_watcher, notifier.send
+        ),
+        spawn_supervised(
+            "admin_redispatch_watcher", _admin_redispatch_watcher, notifier.send
+        ),
+        spawn_supervised("force_release_watcher", _force_release_watcher, notifier.send),
+        spawn_supervised(
+            "daily_backup",
+            lambda: daily_backup_loop(
                 settings.database_url,
                 settings.backup_dir,
                 settings.backup_interval_seconds,
                 settings.backup_retention,
                 alert_sink=notifier.send,
-            )
+            ),
+            notifier.send,
         ),
     ]
     try:
