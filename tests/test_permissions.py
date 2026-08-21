@@ -73,13 +73,20 @@ def test_owner_can_use_everything():
         (AdminRole.ADMIN, "setgroup", False),
         (AdminRole.ADMIN, "audit", False),
         (AdminRole.ADMIN, "setrole", False),
-        # Dasturchi — texnik sozlash
+        # Dasturchi — texnik sozlash + tashxis
         (AdminRole.DASTURCHI, "addbot", True),
         (AdminRole.DASTURCHI, "settemplate", True),
         (AdminRole.DASTURCHI, "setbotpattern", True),
         (AdminRole.DASTURCHI, "shadow", True),
+        # Tashxis: nosozlik qidirayotgan Dasturchi "kim nimani o'zgartirgan"
+        # va "kim qaysi rolda" savollariga javob topa olishi kerak.
+        (AdminRole.DASTURCHI, "audit", True),
+        (AdminRole.DASTURCHI, "admins", True),
+        (AdminRole.DASTURCHI, "notify", True),
+        # ...lekin o'zgartirish chegarasi saqlanadi:
         (AdminRole.DASTURCHI, "setrole", False),
-        (AdminRole.DASTURCHI, "audit", False),
+        (AdminRole.DASTURCHI, "setactive", False),
+        (AdminRole.DASTURCHI, "setreporttime", False),
         # Rop — statistika, hisobot, adminlar nazorati
         (AdminRole.ROP, "stats", True),
         (AdminRole.ROP, "audit", True),
@@ -92,6 +99,41 @@ def test_owner_can_use_everything():
 )
 def test_role_command_matrix(role, command, expected):
     assert perms.can_use_command(_admin(role), command) is expected
+
+
+@pytest.mark.parametrize(
+    "callback_data,command",
+    [
+        # Tanilmagan javobni shablonga aylantirish = /addcheckpattern
+        ("ucp:5:OTDI", "addcheckpattern"),
+        # Bildirishnoma tugmasi = /notify
+        ("notify:on", "notify"),
+        # "🔌 Sessiyalar" tugmasi = /sessions
+        ("nav:sessions", "sessions"),
+        # Shablon tahriri = /settemplate
+        ("tpl:c:CONFIRMED:edit", "settemplate"),
+        # Yangi bot tugmasi = /addbot
+        ("newbot", "addbot"),
+    ],
+)
+def test_button_and_command_for_the_same_action_agree(callback_data, command):
+    """Bitta amalning ikki yo'li bir xil ruxsatda bo'lishi SHART.
+
+    Jonli sinovda aynan shu buzilgan edi: `ucp` tugmasi `_MANAGE` (Owner/Rop),
+    `/addcheckpattern` esa `_TECH` (Owner/Dasturchi) edi. Natijada Dasturchi
+    buyruq bilan shablon qo'sha olardi, lekin tugmani bossa rad etilardi;
+    Rop esa aksincha. Foydalanuvchi uchun bu tushunarsiz: bir xil ish, ikki
+    xil javob.
+    """
+    tugma_rollari = perms.roles_for_callback(callback_data)
+    buyruq_rollari = perms.COMMANDS[command].roles
+
+    assert tugma_rollari == buyruq_rollari, (
+        f"{callback_data!r} tugmasi va /{command} buyrug'i bir xil amalni "
+        f"bajaradi, lekin ruxsatlari boshqacha:\n"
+        f"  tugma : {sorted(r.value for r in tugma_rollari)}\n"
+        f"  buyruq: {sorted(r.value for r in buyruq_rollari)}"
+    )
 
 
 def test_only_owner_can_change_roles_and_activation():

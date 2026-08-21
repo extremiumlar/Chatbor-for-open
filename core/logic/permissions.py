@@ -47,6 +47,13 @@ _MANAGE = frozenset({OWNER, ROP})
 # Faqat egasi: rol berish, adminni o'chirish/yoqish.
 _OWNER_ONLY = frozenset({OWNER})
 
+# Tashxis (diagnostika): o'zi hech narsani buzmaydigan, lekin "nima bo'lyapti?"
+# savoliga javob beradigan bo'limlar — adminlar ro'yxati, harakatlar tarixi,
+# bildirishnoma tafsiloti. Dasturchi ularsiz nosozlikni topa olmaydi: kim
+# nimani o'zgartirgani ko'rinmasa, texnik sozlashning o'zi ham ko'r ish
+# bo'lib qoladi. Shuning uchun Boshqaruv + Texnik birga.
+_MANAGE_OR_TECH = _MANAGE | _TECH
+
 
 @dataclass(frozen=True)
 class Perm:
@@ -112,12 +119,20 @@ COMMANDS: dict[str, Perm] = {
         _p("shadow", _TECH, "Texnik sozlash", "/shadow", "Soya rejimi (mijozga yozilmaydi)"),
         _p("uyqu", _TECH, "Texnik sozlash", "/uyqu off|on", "Kompyuter uyqu rejimi"),
         # --- Boshqaruv va hisobot (Rop) ---
-        _p("notify", _MANAGE, "Boshqaruv va hisobot", "/notify", "Bildirishnoma rejimi"),
+        # Bildirishnoma tafsiloti — nosozlik qidirayotgan Dasturchiga ham
+        # kerak (batafsil rejimda har hodisa alert bo'lib chiqadi).
+        _p("notify", _MANAGE_OR_TECH, "Boshqaruv va hisobot", "/notify",
+           "Bildirishnoma rejimi"),
+        # Kunlik hisobot vaqti — sof boshqaruv qarori, texnik ish emas.
         _p("setreporttime", _MANAGE, "Boshqaruv va hisobot", "/setreporttime HH:MM",
            "Kunlik hisobot vaqti"),
-        _p("audit", _MANAGE, "Boshqaruv va hisobot", "/audit", "Admin harakatlari tarixi"),
-        # --- Adminlar (faqat Owner) ---
-        _p("admins", _MANAGE, "Adminlar", "/admins", "Adminlar ro'yxati"),
+        _p("audit", _MANAGE_OR_TECH, "Boshqaruv va hisobot", "/audit",
+           "Admin harakatlari tarixi"),
+        # --- Adminlar ---
+        # Ro'yxatning O'ZI ko'rish amali (kim qaysi rolda, tg_id nechchi) —
+        # Dasturchiga sozlash uchun kerak. O'ZGARTIRISH (pastdagi ikkitasi)
+        # esa faqat egasida qoladi.
+        _p("admins", _MANAGE_OR_TECH, "Adminlar", "/admins", "Adminlar ro'yxati"),
         _p("setrole", _OWNER_ONLY, "Adminlar", "/setrole", "Rol berish"),
         _p("setactive", _OWNER_ONLY, "Adminlar", "/setactive", "Adminni yoqish/o'chirish"),
     ]
@@ -156,15 +171,19 @@ CALLBACKS: dict[str, frozenset] = {
     "block": _OPERATE,
     # v2: FAILED natijani tasdiqlash (mijozga yuborish/bekor) — operator ishi.
     "vres": _OPERATE,
-    # v2: tanilmagan javobni shablonga aylantirish — handler ichida qo'shimcha
-    # Owner/Rop tekshiruvi ham bor (shablon yozish superadmin huquqi).
-    "ucp": _MANAGE,
+    # v2: tanilmagan javobni shablonga aylantirish.
+    # MUHIM: bu tugma `/addcheckpattern` bilan AYNAN bir xil ishni bajaradi —
+    # tanish shabloniga yozadi. Shuning uchun ruxsati ham bir xil (`_TECH`)
+    # bo'lishi shart. Avval tugma `_MANAGE` edi: Dasturchi buyruq bilan
+    # shablon qo'sha olardi, lekin tugmani bossa rad etilardi; Rop esa
+    # aksincha. Bir amalning ikki yo'li ikki xil rolga ochiq edi.
+    "ucp": _TECH,
     # Texnik o'zgartirish
     "tpl:edit": _TECH,
     "bot:act": _TECH,
     "newbot": _TECH,
-    # Boshqaruv
-    "notify": _MANAGE,
+    # Boshqaruv (buyruq bilan bir xil — `/notify` ga qarang)
+    "notify": _MANAGE_OR_TECH,
 }
 
 MENU_BUTTONS: dict[str, frozenset] = {
