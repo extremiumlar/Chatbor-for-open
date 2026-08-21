@@ -47,7 +47,7 @@ TO'LIQ kirish. `chmod 700 sessions`, SSH faqat kalit bilan, backupga qo'shmang.
 | 3 | `/addcheckpattern OTDI bor` (va h.k.) | Uch kategoriya (OTDI/OTMADI/XATO) har birida kamida bittadan — bo'lmasa dvigatel ishga tushmaydi |
 | 4 | `/testcheck <haqiqiy javob>` | Tanishni sinash |
 | 5 | *(soya rejimi standart YOQILGAN)* | 1–2 kun kuzating: `/unrecognized` jurnalidan shablonlarni tugma bilan to'ldiring |
-| 6 | `/shadow` | Jonli rejimga o'tish — endi natijalar mijozlarga boradi |
+| 6 | `/shadow off` | Jonli rejimga o'tish — endi natijalar mijozlarga boradi. **Argumentsiz `/shadow` faqat holatni ko'rsatadi**, hech narsani o'zgartirmaydi (avval u almashtirib yuborardi — jonli sinovda soya rejimi tasodifan 2 marta o'chib ketgan edi) |
 
 ## Kundalik foydalanish
 
