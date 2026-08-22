@@ -42,7 +42,10 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChatMember,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -184,6 +187,47 @@ def should_handle_in_chat(chat_type: str, text: str | None) -> bool:
         return True
     body = (text or "").strip()
     return body.startswith("/")
+
+
+async def sync_group_command_menus(bot: Bot) -> None:
+    """Nazorat guruhidagi "/" buyruq TAKLIF ro'yxatini har adminning
+    roliga moslaydi (Telegram `BotCommandScopeChatMember`).
+
+    Guruhda endi istalgan buyruq ISHLAYDI (yuqoridagi
+    `should_handle_in_chat`), lekin Telegram'ning o'zi ko'rsatadigan
+    "/" taklif menyusi hamon bitta umumiy ro'yxat bo'lib qolsa,
+    Kuzatuvchi ham `/setrole` kabi o'ziga yopiq buyruqlarni ro'yxatda
+    ko'raverardi (bosганда baribir rad etiladi — bu FAQAT ko'rinish,
+    haqiqiy tekshiruv hamon `RolePermission`da). Shuning uchun har admin
+    uchun alohida, faqat o'ziga ochiq buyruqlar ro'yxati yuboriladi.
+
+    Chaqiriladi: dastur ishga tushganda, va rol/faollik/guruh
+    o'zgarganda (`/setrole`, `/setactive`, `/setgroup`).
+    """
+    async with get_session() as session:
+        group_chat_id = await get_group_chat_id(session)
+        if group_chat_id is None:
+            return
+        admins = await list_admins(session)
+
+    for admin in admins:
+        scope = BotCommandScopeChatMember(chat_id=group_chat_id, user_id=admin.tg_user_id)
+        try:
+            if admin.is_active:
+                commands = [
+                    BotCommand(command=p.key, description=(p.hint or p.label)[:256])
+                    for p in perms.allowed_commands(admin)
+                ]
+                await bot.set_my_commands(commands, scope=scope)
+            else:
+                await bot.delete_my_commands(scope=scope)
+        except TelegramBadRequest:
+            # Admin hali guruh a'zosi bo'lmasligi mumkin (Telegram bunday
+            # scope'ni rad etadi) — keyingi sinxronizatsiyada qayta urinamiz.
+            log.warning(
+                "Buyruq menyusi sinxronlanmadi: admin #%s (%s) guruh a'zosi "
+                "emasmi?", admin.id, admin.tg_user_id,
+            )
 
 
 class IsAdmin(BaseFilter):
@@ -1615,7 +1659,9 @@ async def cmd_admins(message: Message) -> None:
 
 
 @admin_router.message(Command("setrole"))
-async def cmd_setrole(message: Message, command: CommandObject, current_admin: Admin) -> None:
+async def cmd_setrole(
+    message: Message, command: CommandObject, current_admin: Admin, bot: Bot
+) -> None:
     """Audit K-4/J-8 — faqat OWNER boshqa adminning rolini o'zgartira oladi
     (TZ 14-bo'lim: Owner — hammasi).
 
@@ -1661,6 +1707,8 @@ async def cmd_setrole(message: Message, command: CommandObject, current_admin: A
             session, message.from_user.id, "set_admin_role", f"admin #{updated.id} -> {role.value}"
         )
 
+    await sync_group_command_menus(bot)
+
     text = f"✅ <code>{raw_tg_id}</code> endi <b>{role.value}</b>."
     if oxirgi_owner:
         kim = "Siz" if target.tg_user_id == message.from_user.id else display_name(target)
@@ -1693,7 +1741,7 @@ async def cmd_botpatterns(message: Message) -> None:
 
 @admin_router.message(Command("setgroup"))
 async def cmd_setgroup(
-    message: Message, command: CommandObject, current_admin: Admin
+    message: Message, command: CommandObject, current_admin: Admin, bot: Bot
 ) -> None:
     """Nazorat guruhini belgilaydi — TZ v2 5.2.
 
@@ -1736,6 +1784,9 @@ async def cmd_setgroup(
         await log_action(
             session, message.from_user.id, "set_group_chat", str(chat_id)
         )
+
+    await sync_group_command_menus(bot)
+
     await message.answer(
         f"✅ Nazorat guruhi belgilandi: <code>{chat_id}</code>\n"
         f"Endi rasm partiyalari shu guruhga tushadi.\n\n"
@@ -1882,7 +1933,7 @@ async def _build_vstats(
 
 @admin_router.message(Command("setactive"))
 async def cmd_setactive(
-    message: Message, command: CommandObject, current_admin: Admin
+    message: Message, command: CommandObject, current_admin: Admin, bot: Bot
 ) -> None:
     """TZ v2 4.2b — adminni nofaol/faol qilish (superadmin).
 
@@ -1915,6 +1966,8 @@ async def cmd_setactive(
             f"admin #{target.id} -> {'on' if make_active else 'off'}",
         )
         await session.commit()
+
+        await sync_group_command_menus(bot)
 
         if make_active:
             await message.answer(
@@ -2637,6 +2690,8 @@ async def main() -> None:
     async with get_session() as session:
         await ensure_admins_seeded(session, settings.admin_tg_ids)
         await ensure_templates_seeded(session)
+
+    await sync_group_command_menus(bot)
 
     log.info("Adminbot ishga tushdi (tugmali interfeys).")
     await dp.start_polling(bot)

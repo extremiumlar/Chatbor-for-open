@@ -547,3 +547,77 @@ async def test_list_cases_by_statuses_filters_and_orders_newest_first(
         )
         # id bo'yicha kamayish tartibida — eng yangisi birinchi
         assert [c.phone for c in both] == ["998909222222", "998909111111"]
+
+
+# --------------------------------------------------------------------------- #
+# Nazorat guruhidagi "/" buyruq menyusi — har admin faqat o'ziga ochiq
+# buyruqlarni ko'rsin (foydalanuvchi so'rovi: guruhda ko'rinish rolga qarab)
+# --------------------------------------------------------------------------- #
+
+
+async def test_sync_group_command_menus_filters_by_role(session_factory, monkeypatch):
+    import adminbot_service.bot as ab
+    from core.logic.admins import ensure_admins_seeded, set_admin_role
+    from core.logic.settings_store import set_group_chat_id
+    from core.models import Admin, AdminRole
+
+    monkeypatch.setattr(ab, "get_session", session_factory)
+
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111, 222])
+        await set_group_chat_id(session, -100500)
+        owner, kuzatuvchi = (
+            await session.execute(select(Admin).order_by(Admin.id))
+        ).scalars().all()
+        await set_admin_role(session, kuzatuvchi.id, AdminRole.KUZATUVCHI)
+
+    calls: list[tuple] = []
+
+    class FakeBot:
+        async def set_my_commands(self, commands, scope):
+            calls.append(("set", scope.user_id, {c.command for c in commands}))
+
+        async def delete_my_commands(self, scope):
+            calls.append(("delete", scope.user_id, set()))
+
+    await ab.sync_group_command_menus(FakeBot())
+
+    by_user = {user_id: cmds for kind, user_id, cmds in calls if kind == "set"}
+    assert "setrole" in by_user[111]  # Owner — hammasi
+    assert "setrole" not in by_user[222]  # Kuzatuvchi — bunga yopiq
+    assert "help" in by_user[222]  # Kuzatuvchi — ko'rish baribir ochiq
+
+
+async def test_sync_group_command_menus_clears_menu_for_inactive_admin(
+    session_factory, monkeypatch
+):
+    import adminbot_service.bot as ab
+    from core.logic.admins import ensure_admins_seeded
+    from core.logic.settings_store import set_group_chat_id
+    from core.models import Admin
+
+    monkeypatch.setattr(ab, "get_session", session_factory)
+
+    async with session_factory() as session:
+        await ensure_admins_seeded(session, [111, 222])
+        await set_group_chat_id(session, -100500)
+        target = (
+            await session.execute(select(Admin).where(Admin.tg_user_id == 222))
+        ).scalars().first()
+        target.is_active = False
+        await session.commit()
+
+    calls: list[tuple] = []
+
+    class FakeBot:
+        async def set_my_commands(self, commands, scope):
+            calls.append(("set", scope.user_id))
+
+        async def delete_my_commands(self, scope):
+            calls.append(("delete", scope.user_id))
+
+    await ab.sync_group_command_menus(FakeBot())
+
+    assert ("delete", 222) in calls
+    assert ("set", 222) not in calls
+    assert ("set", 111) in calls
