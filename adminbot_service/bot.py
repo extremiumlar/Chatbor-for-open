@@ -165,29 +165,25 @@ from core.models import (
 log = logging.getLogger("adminbot")
 
 
-# Guruh ichida ATAYLAB ishlaydigan buyruqlar (qolganlari faqat lichkada —
-# aks holda nazorat guruhi "Tushunmadim" javoblari bilan to'lib ketadi).
-GROUP_ALLOWED_COMMANDS = frozenset({"setgroup", "help"})
-
-
 def should_handle_in_chat(chat_type: str, text: str | None) -> bool:
     """Bot shu chatdagi shu xabarga umuman javob berishi kerakmi.
 
     Lichkada — har doim (keyin oddiy handler'lar hal qiladi). Guruhda esa
-    FAQAT `GROUP_ALLOWED_COMMANDS` dagi buyruqlarga. Avval bunday cheklov
-    yo'q edi: nazorat guruhiga forward qilingan rasmlar va caption (ichida
-    nomer bor) botni ishga tushirib, arxiv guruhini "Tushunmadim" va
-    qidiruv natijalari bilan to'ldirardi — jonli sinovda har rasm
-    partiyasidan keyin 3 ta chiqindi xabar, kuniga ~140 ta
-    (TZ v2 5.2 — guruh toza arxiv bo'lishi kerak).
+    FAQAT `/` bilan boshlangan buyruqlarga (qaysi buyruq bo'lishidan
+    qat'iy nazar — foydalanuvchi qarori, endi barcha buyruq nazorat
+    guruhida ham ishlaydi). Oddiy matn (caption, rasm) hamon TO'SILADI:
+    nazorat guruhiga forward qilingan rasmlar va caption (ichida nomer
+    bor) botni ishga tushirib, arxiv guruhini "Tushunmadim" va qidiruv
+    natijalari bilan to'ldirmasligi kerak — jonli sinovda har rasm
+    partiyasidan keyin 3 ta chiqindi xabar, kuniga ~140 ta chiqqan edi
+    (TZ v2 5.2 — guruh toza arxiv bo'lishi kerak). Bu himoya buyruq
+    ro'yxati ochilgandan keyin ham saqlanib qoladi, chunki caption/rasm
+    "/" bilan boshlanmaydi.
     """
     if chat_type not in ("group", "supergroup"):
         return True
     body = (text or "").strip()
-    if not body.startswith("/"):
-        return False
-    command = body[1:].split(maxsplit=1)[0].split("@")[0].lower()
-    return command in GROUP_ALLOWED_COMMANDS
+    return body.startswith("/")
 
 
 class IsAdmin(BaseFilter):

@@ -213,22 +213,24 @@ def test_t3_check_command_is_matched_exactly(text, expected):
         ("private", "998901234567", True),
         ("private", "/stats", True),
         ("private", None, True),
-        # Guruhda faqat ataylab ruxsat berilgan buyruqlar.
+        # Guruhda endi ISTALGAN buyruq ishlaydi (foydalanuvchi qarori).
         ("supergroup", "/setgroup", True),
         ("supergroup", "/help", True),
         ("supergroup", "/help@O_B_adminsbot", True),
         ("group", "/setgroup", True),
-        # Guruhdagi qolgan hamma narsa to'siladi.
-        ("supergroup", "/stats", False),
+        ("supergroup", "/stats", True),
+        ("supergroup", "/vstats", True),
+        # Lekin caption/rasm hamon to'siladi — T-4 spam himoyasi saqlanadi.
         ("supergroup", "salom", False),
         ("supergroup", "998901234567 KOD-12", False),  # caption — nomer bor
         ("supergroup", None, False),                   # rasm (matnsiz)
         ("supergroup", "", False),
     ],
 )
-def test_t4_bot_answers_in_group_only_for_allowed_commands(chat_type, text, expected):
-    """Guruhga forward qilingan rasm va caption botni ishga tushirib,
-    arxivni "Tushunmadim" javoblari bilan to'ldirardi (kuniga ~140 ta)."""
+def test_t4_bot_answers_in_group_only_for_commands(chat_type, text, expected):
+    """Guruhga forward qilingan rasm va caption (buyruq emas) botni ishga
+    tushirib, arxivni "Tushunmadim" javoblari bilan to'ldirardi (kuniga
+    ~140 ta). Buyruqlarning o'zi endi guruhda ham ishlaydi."""
     from adminbot_service.bot import should_handle_in_chat
 
     assert should_handle_in_chat(chat_type, text) is expected
