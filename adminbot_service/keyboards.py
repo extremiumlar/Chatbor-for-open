@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from core.enums import CaseStatus, MANUAL_RESOLVABLE_STATUSES
+from core.logic.templates import is_active
 from core.logic.bot_pool import PHONE_FORMATS
 
 # --------------------------------------------------------------------------- #
@@ -171,10 +172,34 @@ def templates_root() -> InlineKeyboardMarkup:
 
 
 def template_keys(keys, kind: str) -> InlineKeyboardMarkup:
-    """kind: 'c' = mijozga yuboriladigan, 'b' = bot-tanish."""
+    """kind: 'c' = mijozga yuboriladigan, 'b' = bot-tanish.
+
+    Mijoz shablonlarida ISHLAYDIGANLARI yuqorida, v1 merosi esa ajratgich
+    ostida ko'rsatiladi — aks holda admin o'lik shablonni tahrirlab, matnim
+    nega chiqmayapti deb ovora bo'ladi (jonli sinovda shunday bo'lgan).
+    """
+    if kind != "c":
+        rows = [
+            [InlineKeyboardButton(text=key, callback_data=f"tpl:{kind}:{key}")]
+            for key in keys
+        ]
+        rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="nav:templates")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    keys = list(keys)
+    active = [k for k in keys if is_active(k)]
+    legacy = [k for k in keys if not is_active(k)]
+
     rows = [
-        [InlineKeyboardButton(text=key, callback_data=f"tpl:{kind}:{key}")] for key in keys
+        [InlineKeyboardButton(text=f"✅ {key}", callback_data=f"tpl:{kind}:{key}")]
+        for key in active
     ]
+    if legacy:
+        rows.append([InlineKeyboardButton(text="— — ishlatilmaydi — —", callback_data="noop")])
+        rows += [
+            [InlineKeyboardButton(text=f"💤 {key}", callback_data=f"tpl:{kind}:{key}")]
+            for key in legacy
+        ]
     rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="nav:templates")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -149,7 +149,16 @@ from core.logic.v2_stats import (
     render_stats,
     tashkent_day_start_utc,
 )
-from core.logic.templates import DEFAULTS, ensure_templates_seeded, get_template, list_templates, set_template
+from core.logic.templates import (
+    DEFAULTS,
+    V2_ACTIVE_KEYS as tpl_active_keys,
+    V2_LEGACY_KEYS as tpl_legacy_keys,
+    ensure_templates_seeded,
+    get_template,
+    is_active as tpl_is_active,
+    list_templates,
+    set_template,
+)
 from core.models import (
     Admin,
     AdminRole,
@@ -721,7 +730,15 @@ async def cb_tpl_customer(callback: CallbackQuery) -> None:
         return
     await _edit(
         callback,
-        "💬 <b>Mijozga yuboriladigan shablonlar</b> (TZ 7.2)\n\nKo'rish/tahrirlash uchun tanlang:",
+        "💬 <b>Mijozga yuboriladigan shablonlar</b>\n\n"
+        "✅ — tizim shu matnlarni haqiqatan yuboradi:\n"
+        "  • <b>SCREENSHOT_FOLLOWUP</b> — siz rasm tashlaganingizda\n"
+        "  • <b>ALREADY_CONFIRMED</b> — nomer allaqachon o'tgan bo'lsa\n"
+        "  • <b>RESULT_PASSED</b> — ovoz o'tdi\n"
+        "  • <b>RESULT_FAILED</b> — ovoz o'tmadi (siz tasdiqlagach)\n\n"
+        "💤 — eski (v1) oqimdan qolgan, hozirgi tizimda <b>hech qachon "
+        "yuborilmaydi</b>. Ularni tahrirlash hech narsani o'zgartirmaydi.\n\n"
+        "Ko'rish/tahrirlash uchun tanlang:",
         kb.template_keys(DEFAULTS.keys(), "c"),
     )
     await callback.answer()
@@ -763,9 +780,20 @@ async def cb_template_card(callback: CallbackQuery) -> None:
             title = "🤖 Bot javobini tanish"
 
     shown = value if value else "<i>❌ kiritilmagan</i>"
+    # O'lik shablonni tahrirlash bekorga vaqt sarflash — kartochkaning
+    # o'zida aytiladi, aks holda admin matnni o'zgartirib, nega chiqmadi
+    # deb qidiradi (jonli sinovda `CONFIRMED` bilan shunday bo'lgan).
+    ogoh = ""
+    if kind == "c" and not tpl_is_active(key):
+        ogoh = (
+            "\n\n💤 <b>Bu shablon hozirgi tizimda ISHLATILMAYDI</b> — eski (v1) "
+            "avtomatik oqimdan qolgan. Uni o'zgartirsangiz ham mijozga "
+            "yuborilmaydi.\n"
+            "Rasm tashlaganingizda ketadigan matn — <b>SCREENSHOT_FOLLOWUP</b>."
+        )
     await _edit(
         callback,
-        f"{title}\n\n<b>{key}</b>\n\n{shown}",
+        f"{title}\n\n<b>{key}</b>\n\n{shown}{ogoh}",
         kb.template_card(kind, key),
     )
     await callback.answer()
@@ -1584,9 +1612,17 @@ async def _set_via_command(message: Message, command: CommandObject, kind: str) 
     cmd = "settemplate" if kind == "c" else "setbotpattern"
 
     if not command.args or len(command.args.split(maxsplit=1)) < 2:
-        keys = ", ".join(valid)
+        if kind == "c":
+            # Ishlaydiganini o'likdan ajratib ko'rsatamiz — bir tekis ro'yxat
+            # adminni o'lik shablonni tahrirlashga yo'naltirardi.
+            keys = (
+                "Ishlaydiganlari: " + ", ".join(tpl_active_keys) + "\n"
+                "💤 Ishlatilmaydi (v1 merosi): " + ", ".join(tpl_legacy_keys)
+            )
+        else:
+            keys = "Kalitlar: " + ", ".join(valid)
         await message.answer(
-            f"Format: <code>/{cmd} &lt;KEY&gt; &lt;matn&gt;</code>\nKalitlar: {keys}\n\n"
+            f"Format: <code>/{cmd} &lt;KEY&gt; &lt;matn&gt;</code>\n{keys}\n\n"
             "Yoki 📝 <b>Shablonlar</b> tugmasidan foydalaning (osonroq)."
         )
         return
@@ -1605,7 +1641,14 @@ async def _set_via_command(message: Message, command: CommandObject, kind: str) 
             await set_bot_pattern(session, key, value)
             await log_action(session, message.from_user.id, "setbotpattern", f"{key} -> {value}")
 
-    await message.answer(f"✅ <b>{key}</b> yangilandi:\n\n{value}")
+    javob = f"✅ <b>{key}</b> yangilandi:\n\n{value}"
+    if kind == "c" and not tpl_is_active(key):
+        javob += (
+            "\n\n💤 <b>Diqqat:</b> bu shablon hozirgi tizimda ishlatilmaydi "
+            "(eski v1 oqimi) — matn mijozga yuborilmaydi.\n"
+            "Rasm tashlaganingizda ketadigani — <b>SCREENSHOT_FOLLOWUP</b>."
+        )
+    await message.answer(javob)
 
 
 async def _admins_overview() -> tuple[str, InlineKeyboardMarkup]:

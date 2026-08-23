@@ -29,6 +29,44 @@ DEFAULTS: dict[str, str] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Qaysi shablon HAQIQATAN ishlatiladi (TZ v2 — qo'lda admin oqimi)
+# --------------------------------------------------------------------------- #
+#
+# v1 (avtomatik bot tekshiruvi) davridan 7 ta shablon qolgan. v2 da mijoz
+# bilan faqat admin gaplashadi, tizim esa to'rt joyda yozadi — qolganlari
+# hech qachon yuborilmaydi.
+#
+# Nega bu muhim: ro'yxat ularni birdek ko'rsatsa, admin o'lik shablonni
+# tahrirlab, matnim nega chiqmayapti deb ovora bo'ladi. Jonli sinovda aynan
+# shunday bo'ldi — `CONFIRMED` "Ovozingiz oldim 1,5 soatda eslating" deb
+# tahrirlangan, lekin u v2 da umuman yuborilmaydi; kerak bo'lgani
+# `SCREENSHOT_FOLLOWUP` edi.
+#
+# DIQQAT: o'lik shablonlar O'CHIRILMAYDI — v1 kodi (`core/logic/case_manager.py`,
+# `teleton_service/relay.py`) ularga hali murojaat qiladi va o'chirilsa
+# `KeyError` bilan yiqilardi. Ular faqat ro'yxatda ajratib ko'rsatiladi.
+#
+# Bu ro'yxatning kod bilan mosligini `tests/test_templates_usage.py`
+# tekshiradi — qo'lda yozilgan ro'yxat ertami-kech chetlashadi.
+
+V2_ACTIVE_KEYS: tuple[str, ...] = (
+    "SCREENSHOT_FOLLOWUP",   # §5.3 — admin rasm tashlagach
+    "ALREADY_CONFIRMED",     # §6.1a4 — nomer allaqachon o'tgan
+    "RESULT_PASSED",         # §7.2 — o'tdi (avtomatik)
+    "RESULT_FAILED",         # §7.2 — o'tmadi (admin tasdiqlagach)
+)
+
+V2_LEGACY_KEYS: tuple[str, ...] = tuple(
+    k for k in DEFAULTS if k not in V2_ACTIVE_KEYS
+)
+
+
+def is_active(key: str) -> bool:
+    """Shablon v2 oqimida mijozga yuboriladimi."""
+    return key in V2_ACTIVE_KEYS
+
+
 async def ensure_templates_seeded(session: AsyncSession) -> None:
     result = await session.execute(select(Template.key))
     existing = {row[0] for row in result.all()}
