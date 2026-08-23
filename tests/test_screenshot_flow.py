@@ -110,12 +110,69 @@ async def test_t15_followup_template_is_sent_only_once_per_case(
     flow = make_flow()
 
     first = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+    assert first.customer_text, "birinchi partiyada §5.3 matni bo'lishi kerak"
+    # Relay matnni yuborgach shuni chaqiradi — shundan keyingina "yuborilgan"
+    # deb hisoblanadi.
+    await flow.mark_followup_sent(first.case_id)
+
     second = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
     third = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [30], 1)
 
-    assert first.customer_text, "birinchi partiyada §5.3 matni bo'lishi kerak"
     assert second.customer_text is None
     assert third.customer_text is None
+
+
+@pytest.mark.asyncio
+async def test_t15_followup_retried_until_it_is_actually_sent(
+    session_factory, make_flow
+):
+    """T-15 dagi teshik: shart "birinchi partiyami?" emas, "YUBORILGANMI?".
+
+    Jonli sinovda birinchi partiya soya rejimida tashlangan (matn to'silgan),
+    keyingilari esa "birinchi emas" deb jim qolgan — mijoz matnni HECH
+    QACHON olmagan. Yuborilmagan matn keyingi partiyada qayta berilishi
+    kerak.
+    """
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    flow = make_flow()
+
+    # 1-partiya: matn berildi, lekin yuborilmadi (soya rejimi / tarmoq xatosi)
+    # — ya'ni `mark_followup_sent` CHAQIRILMAYDI.
+    first = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+    assert first.customer_text
+
+    # 2-partiya: matn hali yetkazilmagani uchun QAYTA berilishi kerak.
+    second = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [20], 1)
+    assert second.customer_text, "yuborilmagan matn qayta berilmadi"
+
+    # Endi haqiqatan yuborildi deb belgilaymiz.
+    await flow.mark_followup_sent(second.case_id)
+
+    # 3-partiya: endi jim (spam bo'lmasin).
+    third = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [30], 1)
+    assert third.customer_text is None
+
+
+@pytest.mark.asyncio
+async def test_t15_mark_followup_sent_is_idempotent(session_factory, make_flow):
+    """Ikki marta belgilansa birinchi vaqt saqlanib qolsin."""
+    from core.models import Case
+
+    await _seed_admin_and_case(session_factory)
+    await _set_group(session_factory)
+    flow = make_flow()
+
+    decision = await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [10], 1)
+    await flow.mark_followup_sent(decision.case_id)
+    async with session_factory() as session:
+        birinchi = (await session.get(Case, decision.case_id)).followup_sent_at
+
+    await flow.mark_followup_sent(decision.case_id)
+    async with session_factory() as session:
+        ikkinchi = (await session.get(Case, decision.case_id)).followup_sent_at
+
+    assert birinchi == ikkinchi
 
 
 @pytest.mark.asyncio

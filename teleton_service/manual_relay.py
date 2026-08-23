@@ -397,6 +397,12 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                         admin.name,
                         chat_id,
                     )
+                else:
+                    # Faqat HAQIQATAN ketgandan keyin belgilanadi — xato
+                    # bo'lsa belgilanmaydi va keyingi partiyada qayta
+                    # uriniladi (`mark_followup_sent` izohiga qarang).
+                    if decision.case_id is not None:
+                        await screenshot_flow.mark_followup_sent(decision.case_id)
 
     collector = BatchCollector(process_batch, window_seconds=_batch_window_seconds)
 

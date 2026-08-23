@@ -55,6 +55,7 @@ class BatchDecision:
     # oladi (§5.5: mijoz 30 daqiqada nomer yozsa, qayta urinadi).
     no_case: bool = False
     batch_id: int | None = None
+    case_id: int | None = None
     case_short_code: str | None = None
     # None bo'lsa guruh sozlanmagan — forward qilinmaydi (§5.5).
     group_chat_id: int | None = None
@@ -190,19 +191,18 @@ class ScreenshotFlow:
             # matnni qayta-qayta olish spam bo'ladi — jonli sinovda 3 partiya
             # ketma-ket tashlanganda mijoz "tekshirish jarayonida..." matnini
             # 3 marta oldi.
-            oldingi_partiya = (
-                await session.execute(
-                    select(ScreenshotBatch.id)
-                    .where(
-                        ScreenshotBatch.case_id == case.id,
-                        ScreenshotBatch.id != batch.id,
-                    )
-                    .limit(1)
-                )
-            ).scalars().first()
+            #
+            # MUHIM: shart "birinchi partiyami?" EMAS, "matn YUBORILGANMI?".
+            # Avvalgi variant partiya borligiga qarardi va jonli sinovda
+            # teshik chiqdi: birinchi partiya soya rejimida tashlangan
+            # (matn to'silgan), keyingilari esa "birinchi emas" deb jim
+            # qolgan — mijoz matnni hech qachon olmagan. Yuborilgani
+            # `mark_followup_sent` bilan belgilanadi (haqiqiy yuborishdan
+            # KEYIN), shuning uchun to'silgan yoki xato bergan yuborish
+            # keyingi partiyada qayta uriniladi.
             customer_text = (
                 None
-                if oldingi_partiya is not None
+                if case.followup_sent_at is not None
                 else await get_template(session, "SCREENSHOT_FOLLOWUP")
             )
 
@@ -216,12 +216,27 @@ class ScreenshotFlow:
             )
             return BatchDecision(
                 batch_id=batch.id,
+                case_id=case.id,
                 case_short_code=case.short_code,
                 group_chat_id=group_chat_id,
                 caption=caption,
                 customer_text=customer_text,
                 is_duplicate=prev is not None,
             )
+
+    async def mark_followup_sent(self, case_id: int) -> None:
+        """§5.3 matni mijozga HAQIQATAN yetkazilgach chaqiriladi.
+
+        Aynan yuborishdan KEYIN belgilanadi: soya rejimida to'silgan yoki
+        tarmoq xatosi bilan ketmagan matn belgilanmaydi va keyingi partiyada
+        qayta uriniladi. Aks holda mijoz matnni umuman olmay qolardi.
+        """
+        async with self.session_factory() as session:
+            case = await session.get(Case, case_id)
+            if case is None or case.followup_sent_at is not None:
+                return
+            case.followup_sent_at = datetime.datetime.utcnow()
+            await session.commit()
 
     async def record_group_post(
         self, batch_id: int, group_chat_id: int, group_message_id: int

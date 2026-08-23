@@ -187,6 +187,15 @@ class Case(Base):
     coupon: Mapped[str | None] = mapped_column(String(16), nullable=True)
     coupon_at: Mapped[datetime.datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # TZ v2 5.3 — mijozga "tekshirish jarayonida" matni case boshiga BIR
+    # MARTA ketadi. Muhimi: bu yerda YUBORILGAN vaqt saqlanadi, "partiya
+    # bor-yo'qligi" emas. Avval "birinchi partiyami?" deb tekshirilardi va
+    # birinchi yuborish to'silsa (soya rejimi) yoki xato bersa, keyingi
+    # partiyalar ham jim qolib, mijoz matnni HECH QACHON olmasdi.
+    followup_sent_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
     user: Mapped["User"] = relationship(back_populates="cases")
     attempts: Mapped[list["CouponAttempt"]] = relationship(back_populates="case")
 
