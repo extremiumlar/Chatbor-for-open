@@ -93,9 +93,8 @@ class ManualCaseManager:
                     # O'sha nomer jarayon davomida qayta yozildi — oddiy suhbat,
                     # tizim aralashmaydi (admin o'zi ko'radi).
                     return ManualOutcome(case=latest_case)
-                # Ochiq case turganda BOSHQA nomer keldi — mijozga tizim hech
-                # narsa yozmaydi (admin tabiiy suhbatda o'zi hal qiladi), lekin
-                # admin adashib ikki jarayon ochib yubormasligi uchun alert.
+                # Ochiq case turganda BOSHQA nomer keldi. Adminga alert —
+                # u adashib ikki jarayon ochib yubormasligi uchun.
                 await self._alert(
                     f"Mijoz (tg_id={tg_user_id}) ikkinchi nomer yubordi ({phone}), "
                     f"lekin {latest_case.short_code or f'#{latest_case.id}'} "
@@ -103,7 +102,13 @@ class ManualCaseManager:
                     f"({latest_case.status.value}).",
                     important=True,
                 )
-                return ManualOutcome(case=latest_case)
+                # Mijozga ham aytiladi: oldingi murojaati hali tugamagan.
+                # Avval tizim bu yerda JIM turardi (TZ v2 "admin o'zi hal
+                # qiladi" tamoyili), lekin foydalanuvchi qaroriga ko'ra
+                # DUPLICATE_ACTIVE shabloni yoqildi — mijoz kutayotganini
+                # bilmay ikkinchi nomer yuborishda davom etardi.
+                text = await get_template(session, "DUPLICATE_ACTIVE")
+                return ManualOutcome(customer_text=text, case=latest_case)
 
             passed_case = await self._find_passed_case_by_phone(session, phone)
             if passed_case is not None:
@@ -130,12 +135,16 @@ class ManualCaseManager:
 
     async def handle_coupon_detected(
         self, tg_user_id: int, coupon: str, phone: str | None = None
-    ) -> None:
-        """Mijoz kupon raqamini yozganda — FAQAT saqlanadi (TZ v2 9.2).
+    ) -> str | None:
+        """Mijoz kupon raqamini yozganda — saqlanadi (TZ v2 9.2).
 
-        Hech qanday tekshiruv, hech qanday javob yo'q: kupon "mijoz ovoz
-        bergan" signali va dalil. Ochiq case bo'lmasa, e'tiborsiz qoldiriladi
-        (oddiy suhbatdagi 6 xonali son bo'lishi mumkin).
+        Qaytaradi: mijozga yuboriladigan matn yoki `None` (odatda `None` —
+        kupon jimgina saqlanadi). Matn faqat bitta holatda qaytariladi:
+        case'da allaqachon BOSHQA kupon saqlangan bo'lsa (DUPLICATE_COUPON).
+
+        Hech qanday tekshiruv yo'q: kupon "mijoz ovoz bergan" signali va
+        dalil. Ochiq case bo'lmasa, e'tiborsiz qoldiriladi (oddiy suhbatdagi
+        6 xonali son bo'lishi mumkin).
 
         `phone` berilgan bo'lsa (kupon nomer bilan BITTA xabarda kelgan),
         kupon aynan o'sha nomerli case'ga yoziladi. Avval kupon doim "oxirgi
@@ -148,7 +157,7 @@ class ManualCaseManager:
         async with self.session_factory() as session:
             user = await self._get_user(session, tg_user_id)
             if user is None or user.is_blocked:
-                return
+                return None
 
             if phone is not None:
                 result = await session.execute(
@@ -165,14 +174,28 @@ class ManualCaseManager:
                         "Kupon uchun %s nomerli ochiq case topilmadi — saqlanmadi.",
                         phone,
                     )
-                    return
+                    return None
             else:
                 case = await self._get_latest_case(session, user.id)
                 if case is None or case.status not in V2_OPEN_STATUSES:
-                    return
+                    return None
 
             if case.coupon is not None:
-                return  # birinchi kupon saqlangan — keyingilari e'tiborsiz
+                # Birinchi kupon saqlangan — keyingilari bazaga yozilmaydi.
+                # Lekin mijoz BOSHQA kupon yuborgan bo'lsa, u eski kodni
+                # yuborayotgan bo'lishi mumkin — DUPLICATE_COUPON matni shuni
+                # aytadi. Aynan O'SHA kuponni takror yuborsa jim qolamiz:
+                # "bu eski kod" deb javob berish chalkash bo'lardi.
+                if case.coupon != coupon:
+                    log.info(
+                        "Case %s da kupon allaqachon bor (%s), yangi %s "
+                        "saqlanmadi — mijozga DUPLICATE_COUPON.",
+                        case.short_code or case.id,
+                        case.coupon,
+                        coupon,
+                    )
+                    return await get_template(session, "DUPLICATE_COUPON")
+                return None
 
             case.coupon = coupon
             case.coupon_at = datetime.datetime.utcnow()
@@ -181,6 +204,7 @@ class ManualCaseManager:
                 "Case %s uchun kupon saqlandi (signal: mijoz ovoz bergan).",
                 case.short_code or case.id,
             )
+            return None
 
     # ------------------------------------------------------------------ #
     # Ichki yordamchilar

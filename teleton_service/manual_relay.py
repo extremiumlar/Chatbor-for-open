@@ -50,7 +50,8 @@ from core.logic.settings_store import (
     get_operator_codes,
     is_shadow_mode,
 )
-from core.logic.templates import ensure_templates_seeded
+from core.enums import V2_OPEN_STATUSES
+from core.logic.templates import ensure_templates_seeded, get_template
 from core.models import (
     Admin,
     BatchOutcome,
@@ -206,6 +207,70 @@ async def customer_writes_allowed() -> bool:
     """
     async with get_session() as session:
         return not await is_shadow_mode(session)
+
+
+async def _reply_customer(event, text: str, sabab: str) -> None:
+    """Mijozga shablon javobini yuboradi (soya rejimini hurmat qilib).
+
+    Mijozga yozadigan bir nechta joy bor (ALREADY_CONFIRMED,
+    DUPLICATE_ACTIVE, DUPLICATE_COUPON, IMAGE_INSTEAD_OF_TEXT) — soya
+    tekshiruvi va xato ushlash har birida takrorlanmasin.
+    """
+    if not await customer_writes_allowed():
+        await notifier.send(
+            f"🕶 (soya rejimi) {sabab}: mijozga javob yuborilmadi.",
+            important=False,
+        )
+        return
+    try:
+        await event.reply(text)
+    except Exception:
+        log.exception("Mijozga shablon javobi yuborilmadi (%s)", sabab)
+
+
+# IMAGE_INSTEAD_OF_TEXT uchun sovutish oralig'i: (admin_id, chat_id) -> vaqt.
+# Nega kerak: mijoz albom (5–10 rasm) tashlasa, har rasmga alohida javob
+# ketib, spam bo'lardi. Bir necha daqiqada bitta eslatma yetarli.
+_image_hint_sent: dict[tuple[int, int], datetime.datetime] = {}
+_IMAGE_HINT_COOLDOWN_MINUTES = 10
+
+
+async def _has_media(event) -> bool:
+    """Xabarda media bormi (rasm/fayl/ovoz/kontakt).
+
+    Har qanday "matnsiz" xabarga javob berilmaydi — masalan bo'sh xizmat
+    xabarlariga (guruhga qo'shildi va h.k.) javob bermaslik kerak.
+    """
+    msg = getattr(event, "message", None)
+    if msg is None:
+        return False
+    return any(
+        getattr(msg, nom, None) is not None
+        for nom in ("photo", "document", "voice", "video", "contact", "audio")
+    )
+
+
+async def _has_open_case(tg_user_id: int) -> bool:
+    """Mijozning hozir ochiq murojaati bormi (TZ v2 `V2_OPEN_STATUSES`)."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Case)
+            .join(User, Case.user_id == User.id)
+            .where(User.tg_user_id == tg_user_id)
+            .order_by(Case.id.desc())
+        )
+        case = result.scalars().first()
+        return case is not None and case.status in V2_OPEN_STATUSES
+
+
+def _image_hint_due(admin_id: int, chat_id: int, now: datetime.datetime) -> bool:
+    oxirgi = _image_hint_sent.get((admin_id, chat_id))
+    if oxirgi is not None and (now - oxirgi) < datetime.timedelta(
+        minutes=_IMAGE_HINT_COOLDOWN_MINUTES
+    ):
+        return False
+    _image_hint_sent[(admin_id, chat_id)] = now
+    return True
 
 
 async def _send_customer(admin_id: int, customer_tg_id: int, text: str) -> bool:
@@ -435,7 +500,21 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
 
         text = (event.raw_text or "").strip()
         if not text:
-            return  # v2'da mijoz rasmiga tizim javob bermaydi (kupon oqimi yo'q)
+            # Mijoz matnsiz xabar yubordi (rasm/ovoz/kontakt). TZ v2 §3:
+            # nomer FAQAT matn ko'rinishida taniladi. Ilgari tizim bu yerda
+            # butunlay jim turardi; foydalanuvchi qaroriga ko'ra endi
+            # IMAGE_INSTEAD_OF_TEXT shabloni yuboriladi.
+            #
+            # Ikki cheklov bilan — aks holda bu spamga aylanardi:
+            #  1) faqat OCHIQ CASE YO'Q bo'lganda. Case ochiq bo'lsa mijoz
+            #     nomerini allaqachon yozgan, rasmi esa oddiy suhbat.
+            #  2) sovutish oralig'i — albom (5–10 rasm) bitta eslatma oladi.
+            if await _has_media(event) and not await _has_open_case(tg_user_id):
+                if _image_hint_due(admin.id, chat_id, datetime.datetime.utcnow()):
+                    async with get_session() as session:
+                        hint = await get_template(session, "IMAGE_INSTEAD_OF_TEXT")
+                    await _reply_customer(event, hint, "matnsiz xabar")
+            return
 
         try:
             # MUHIM: tekshiruvchi marshruti NOMER aniqlashdan OLDIN —
@@ -483,17 +562,11 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
                         tg_user_id, coupon, phone=phone
                     )
                 if outcome.customer_text:
-                    # Faqat ALREADY_CONFIRMED holati — boshqa hamma narsada
-                    # tizim jim, admin tabiiy suhbatda o'zi yozadi.
+                    # ALREADY_CONFIRMED yoki DUPLICATE_ACTIVE — mijozga
+                    # tushuntirish. Qolgan hamma holatda tizim jim, admin
+                    # tabiiy suhbatda o'zi yozadi.
                     # §6.4.6 — soya rejimida bu ham yuborilmaydi.
-                    if not await customer_writes_allowed():
-                        await notifier.send(
-                            f"🕶 (soya rejimi) {phone}: mijozga "
-                            f'"allaqachon tasdiqlangan" javobi yuborilmadi.',
-                            important=False,
-                        )
-                    else:
-                        await event.reply(outcome.customer_text)
+                    await _reply_customer(event, outcome.customer_text, phone)
                 # §5.5 — admin rasmni nomerdan OLDIN tashlagan bo'lsa,
                 # endi case ochildi — kutayotgan partiyani bog'laymiz.
                 await flush_pending_batch(event.chat_id)
@@ -502,7 +575,11 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
             coupon = extract_coupon(text)
             if coupon is not None:
                 # TZ v2 9.2 — kupon faqat signal/dalil sifatida saqlanadi.
-                await case_manager.handle_coupon_detected(tg_user_id, coupon)
+                # Case'da allaqachon BOSHQA kupon bo'lsa, mijozga
+                # DUPLICATE_COUPON matni qaytariladi.
+                javob = await case_manager.handle_coupon_detected(tg_user_id, coupon)
+                if javob:
+                    await _reply_customer(event, javob, "kupon")
                 return
 
             # Boshqa har qanday xabar — oddiy suhbat, tizim aralashmaydi.

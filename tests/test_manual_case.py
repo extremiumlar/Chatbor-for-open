@@ -230,7 +230,9 @@ async def test_different_phone_while_open_alerts_admin(session_factory, make_man
 
     second = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, OTHER_PHONE)
 
-    assert second.customer_text is None
+    # Mijozga DUPLICATE_ACTIVE matni ketadi (avval tizim jim turardi —
+    # foydalanuvchi qaroriga ko'ra yoqildi, `test_legacy_templates_live.py`).
+    assert second.customer_text
     assert second.case.id == first.case.id  # yangi case ochilmaydi
     assert len(alerts) == 1
     assert OTHER_PHONE in alerts[0]

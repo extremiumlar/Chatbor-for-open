@@ -735,7 +735,10 @@ async def cb_tpl_customer(callback: CallbackQuery) -> None:
         "  • <b>SCREENSHOT_FOLLOWUP</b> — siz rasm tashlaganingizda\n"
         "  • <b>ALREADY_CONFIRMED</b> — nomer allaqachon o'tgan bo'lsa\n"
         "  • <b>RESULT_PASSED</b> — ovoz o'tdi\n"
-        "  • <b>RESULT_FAILED</b> — ovoz o'tmadi (siz tasdiqlagach)\n\n"
+        "  • <b>RESULT_FAILED</b> — ovoz o'tmadi (siz tasdiqlagach)\n"
+        "  • <b>DUPLICATE_ACTIVE</b> — oldingi murojaat tugamay yangi nomer kelsa\n"
+        "  • <b>DUPLICATE_COUPON</b> — ikkinchi, boshqa kupon kelsa\n"
+        "  • <b>IMAGE_INSTEAD_OF_TEXT</b> — nomer matn emas, rasm bo'lsa\n\n"
         "💤 — eski (v1) oqimdan qolgan, hozirgi tizimda <b>hech qachon "
         "yuborilmaydi</b>. Ularni tahrirlash hech narsani o'zgartirmaydi.\n\n"
         "Ko'rish/tahrirlash uchun tanlang:",
