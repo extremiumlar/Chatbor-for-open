@@ -235,6 +235,29 @@ _image_hint_sent: dict[tuple[int, int], datetime.datetime] = {}
 _IMAGE_HINT_COOLDOWN_MINUTES = 10
 
 
+def _media_ids(messages: list) -> list[int]:
+    """Partiyadagi har rasmning Telegram media id'sini yig'adi.
+
+    Dublikatni RASM bo'yicha aniqlash uchun (§5.4): nomer o'zgargan bo'lsa
+    ham, aynan o'sha rasm qayta tashlanganini shu id ko'rsatadi.
+
+    Telegram media id'si — faylning serverdagi identifikatori. Rasm qayta
+    yuborilsa yoki forward qilinsa id o'zgarmaydi; lekin rasm qaytadan
+    suratga olinsa yoki qayta siqilsa YANGI id oladi va bu usul uni
+    ushlamaydi (mazmun hash'i kerak bo'lardi — foydalanuvchi tezroq
+    variantni tanladi).
+    """
+    ids: list[int] = []
+    for msg in messages:
+        for nom in ("photo", "document", "video", "audio"):
+            media = getattr(msg, nom, None)
+            media_id = getattr(media, "id", None)
+            if media_id is not None:
+                ids.append(int(media_id))
+                break
+    return ids
+
+
 async def _has_media(event) -> bool:
     """Xabarda media bormi (rasm/fayl/ovoz/kontakt).
 
@@ -395,7 +418,12 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
     async def process_batch(chat_id: int, messages: list) -> None:
         """Partiya tayyor — qayd etish, guruhga forward, mijozga matn (§5.2/5.3)."""
         decision = await screenshot_flow.register_batch(
-            admin.id, admin.name, chat_id, [m.id for m in messages], len(messages)
+            admin.id,
+            admin.name,
+            chat_id,
+            [m.id for m in messages],
+            len(messages),
+            media_ids=_media_ids(messages),
         )
 
         if decision.no_case:

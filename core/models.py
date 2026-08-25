@@ -387,9 +387,16 @@ class ScreenshotBatch(Base):
     admin_id: Mapped[int] = mapped_column(ForeignKey("admins.id"))
     phone: Mapped[str] = mapped_column(String(32))
     image_count: Mapped[int] = mapped_column(Integer, default=0)
-    # Telethon media identifikatorlari JSON ro'yxat sifatida — forward
-    # qayta yuklamasdan ishlashi uchun (TZ v2 5.2).
+    # DIQQAT: nomi chalg'ituvchi — bu yerda XABAR id'lari saqlanadi (forward
+    # va reaksiya uchun kerak), media id'lari emas. Media id'lari pastdagi
+    # `media_ids` da.
     file_ids: Mapped[str] = mapped_column(Text, default="[]")
+    # Telegram'dagi media id'lari (rasm/fayl) JSON ro'yxat sifatida.
+    # Dublikatni FAQAT nomer bo'yicha aniqlash yetarli emas: bitta mijoz
+    # bir necha nomer bilan kelishi mumkin, va aksincha — o'sha rasm boshqa
+    # nomer ostida qayta tashlanishi mumkin. Media id bir xil bo'lsa, bu
+    # AYNAN o'sha rasm (qayta yuborilgan yoki forward qilingan).
+    media_ids: Mapped[str] = mapped_column(Text, default="[]")
     group_chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     group_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # TZ v2 5.4 — bitta nomerga ikkinchi partiya (dublikat) belgisi:

@@ -21,6 +21,7 @@ orqali (relay beradi), butun mantiq tarmoqsiz testlanadi.
 
 import asyncio
 import datetime
+import json
 import logging
 import random
 from contextlib import AbstractAsyncContextManager
@@ -263,23 +264,68 @@ class ResultDistributor:
             targets.append(batch)
         await session.commit()
 
+        # Mijoz lichkasidagi rasmga ham reaksiya qo'yish uchun uning
+        # chat id'si kerak (foydalanuvchi so'rovi: natija admin lichkasida
+        # rasmning ustida ko'rinsin, mijozga matn yozilmaydi).
+        case = await session.get(Case, request.case_id)
+        customer = await session.get(User, case.user_id) if case else None
+        customer_chat_id = customer.tg_user_id if customer else None
+
         emoji = REACTION_BY_OUTCOME[outcome]
         for index, batch in enumerate(targets):
-            if batch.group_chat_id is None or batch.group_message_id is None:
-                continue  # guruhga tushmagan partiya
             if index:
                 # §4.5 — shaxsiy akkauntdan ketma-ket avtomatik amallar
                 # orasida tabiiy pauza (bir case'da 3+ partiya bo'lishi
                 # mumkin, ular birdaniga urilmasin).
                 await asyncio.sleep(random.uniform(0.5, 1.5))
-            ok = await self.set_reaction(
-                batch.admin_id, batch.group_chat_id, batch.group_message_id, emoji
-            )
-            if not ok:
-                # §7.3 — reaksiya qo'yilmasa natija bazada saqlanadi + alert.
-                await self.alert_sink(
-                    f"⚠️ Guruhda reaksiya qo'yib bo'lmadi (partiya #{batch.id}, "
-                    f"{emoji}) — guruh sozlamalarida reaksiyalar yopilgan "
-                    f"bo'lishi mumkin. Natija bazada saqlangan.",
-                    True,
+
+            if batch.group_chat_id is not None and batch.group_message_id is not None:
+                ok = await self.set_reaction(
+                    batch.admin_id, batch.group_chat_id, batch.group_message_id, emoji
                 )
+                if not ok:
+                    # §7.3 — reaksiya qo'yilmasa natija bazada saqlanadi + alert.
+                    await self.alert_sink(
+                        f"⚠️ Guruhda reaksiya qo'yib bo'lmadi (partiya #{batch.id}, "
+                        f"{emoji}) — guruh sozlamalarida reaksiyalar yopilgan "
+                        f"bo'lishi mumkin. Natija bazada saqlangan.",
+                        True,
+                    )
+
+            await self._react_in_customer_chat(batch, customer_chat_id, emoji)
+
+    async def _react_in_customer_chat(
+        self, batch: ScreenshotBatch, customer_chat_id: int | None, emoji: str
+    ) -> None:
+        """Mijoz lichkasidagi rasm xabariga natija reaksiyasini qo'yadi.
+
+        Nega kerak: tizim mijozga matn yozmaydi (soya rejimi), shuning uchun
+        admin natijani faqat guruhda ko'rardi — lichkada esa rasm belgisiz
+        turardi va "bu mijozning ovozi o'tganmidi?" degan savolga javob
+        yo'q edi. Endi javob rasmning ustida turadi.
+
+        Faqat BIRINCHI rasmga qo'yiladi: partiyada 3 ta rasm bo'lsa uchalasiga
+        urish ortiqcha API chaqiruvi va lichkada shovqin bo'lardi.
+
+        Xatosi yutiladi va alert BERILMAYDI: guruh reaksiyasi asosiy kanal,
+        bu esa qulaylik. Mijoz reaksiyalarni yopib qo'ygan bo'lsa, har
+        natijada superadminga alert ketishi shovqin bo'lardi.
+        """
+        if customer_chat_id is None:
+            return
+        try:
+            message_ids = json.loads(batch.file_ids or "[]")
+        except json.JSONDecodeError:
+            return
+        if not message_ids:
+            return
+        ok = await self.set_reaction(
+            batch.admin_id, customer_chat_id, int(message_ids[0]), emoji
+        )
+        if not ok:
+            log.info(
+                "Lichkada reaksiya qo'yilmadi (partiya #%s, mijoz=%s) — "
+                "guruhdagi reaksiya asosiy manba bo'lib qoladi.",
+                batch.id,
+                customer_chat_id,
+            )

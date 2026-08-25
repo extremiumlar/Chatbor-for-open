@@ -81,6 +81,7 @@ class ScreenshotFlow:
         tg_user_id: int,
         message_ids: list[int],
         image_count: int,
+        media_ids: list[int] | None = None,
     ) -> BatchDecision:
         """Admin mijozga tashlagan rasm partiyasini qayd etadi.
 
@@ -106,10 +107,17 @@ class ScreenshotFlow:
 
             now = datetime.datetime.utcnow()
 
-            # §5.4 — dublikat: shu nomer uchun BOSHQA case'da avval ham
-            # partiya tashlanganmi. Aynan shu case'ga qo'shimcha rasm tashlash
-            # dublikat emas (§6.1a — normal holat, taymer qayta hisoblanadi).
-            prev = await self._find_previous_batch(session, case.phone, case.id)
+            # §5.4 — dublikat ikki mezon bo'yicha aniqlanadi:
+            #   (1) NOMER — shu nomer uchun BOSHQA case'da partiya bo'lganmi;
+            #   (2) RASM  — aynan shu rasm(lar) avval ham tashlanganmi.
+            # Ikkinchisi kerak, chunki bir mijoz nomerni o'zgartirib o'sha
+            # skrinshotni qayta tashlashi mumkin — nomer bo'yicha tekshiruv
+            # buni o'tkazib yuborardi. Aynan SHU case'ga qo'shimcha rasm
+            # tashlash dublikat emas (§6.1a — normal holat).
+            media_ids = media_ids or []
+            prev = await self._find_previous_batch(
+                session, case.phone, case.id, media_ids
+            )
 
             batch = ScreenshotBatch(
                 case_id=case.id,
@@ -117,6 +125,7 @@ class ScreenshotFlow:
                 phone=case.phone,
                 image_count=image_count,
                 file_ids=json.dumps(message_ids),
+                media_ids=json.dumps(media_ids),
                 is_duplicate=prev is not None,
                 duplicate_of_batch_id=prev.id if prev is not None else None,
             )
@@ -265,9 +274,13 @@ class ScreenshotFlow:
         return case
 
     async def _find_previous_batch(
-        self, session, phone: str, exclude_case_id: int
+        self,
+        session,
+        phone: str,
+        exclude_case_id: int,
+        media_ids: list[int] | None = None,
     ) -> ScreenshotBatch | None:
-        """§5.4 — dublikat = shu nomer uchun BOSHQA case'da tashlangan partiya.
+        """§5.4 — dublikat qidiruvi: NOMER yoki RASM bo'yicha.
 
         O'sha case'ning o'ziga qayta rasm tashlash dublikat EMAS: §6.1a buni
         normal holat deb belgilaydi ("admin rasmni ikkinchi marta tashlasa —
@@ -275,16 +288,48 @@ class ScreenshotFlow:
         uchun har qayta tashlashda superadminga "ikki admin bitta mijoz ustida
         ishlayapti" degan noto'g'ri alert ketardi va caption o'z case'iga
         havola qilib "avval ham tashlangan" deb yozardi.
+
+        Nomerdan tashqari RASM bo'yicha ham qidiriladi: mijoz nomerni
+        o'zgartirib aynan o'sha skrinshotni qayta yuborishi mumkin — bunda
+        nomer boshqa bo'lgani uchun birinchi tekshiruv jim qolardi. Media id
+        bir xil bo'lsa, bu Telegram'dagi AYNAN o'sha rasm.
         """
-        result = await session.execute(
-            select(ScreenshotBatch)
-            .where(
-                ScreenshotBatch.phone == phone,
-                ScreenshotBatch.case_id != exclude_case_id,
+        nomer_bo_yicha = (
+            await session.execute(
+                select(ScreenshotBatch)
+                .where(
+                    ScreenshotBatch.phone == phone,
+                    ScreenshotBatch.case_id != exclude_case_id,
+                )
+                .order_by(ScreenshotBatch.id.desc())
             )
-            .order_by(ScreenshotBatch.id.desc())
-        )
-        return result.scalars().first()
+        ).scalars().first()
+        if nomer_bo_yicha is not None:
+            return nomer_bo_yicha
+
+        if not media_ids:
+            return None
+
+        # Rasm bo'yicha: SQLite'da JSON ro'yxat ichidan qidirish noqulay,
+        # shuning uchun boshqa case'lardagi partiyalarni o'qib, to'plamlar
+        # kesishmasini tekshiramiz. Partiyalar soni kichik (mijoz kesimida
+        # o'nlab), shuning uchun bu qimmat emas.
+        yangi = set(media_ids)
+        boshqalar = (
+            await session.execute(
+                select(ScreenshotBatch)
+                .where(ScreenshotBatch.case_id != exclude_case_id)
+                .order_by(ScreenshotBatch.id.desc())
+            )
+        ).scalars().all()
+        for oldingi in boshqalar:
+            try:
+                eski = set(json.loads(oldingi.media_ids or "[]"))
+            except json.JSONDecodeError:
+                continue
+            if eski & yangi:
+                return oldingi
+        return None
 
     async def _close_jobs(
         self, session, case_id: int, kinds: tuple[JobKind, ...], now: datetime.datetime

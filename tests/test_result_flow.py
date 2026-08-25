@@ -118,6 +118,21 @@ async def _send_request(engine, case_id):
     await engine.drip_tick()
 
 
+def _group_reactions(cb):
+    """Faqat NAZORAT GURUHIDAGI reaksiyalar.
+
+    Natija endi ikki joyga qo'yiladi — guruhga va mijoz lichkasidagi
+    rasmga. Guruh mantig'ini tekshiruvchi testlar lichkanikini
+    hisobga olmasligi kerak.
+    """
+    return [r for r in cb.reactions if r[1] == GROUP_ID]
+
+
+def _dm_reactions(cb):
+    """Mijoz lichkasidagi rasmga qo'yilgan reaksiyalar."""
+    return [r for r in cb.reactions if r[1] == TG_ID]
+
+
 @pytest.mark.asyncio
 async def test_passed_auto_notifies_customer_and_reacts(session_factory):
     case, engine, _, cb = await _setup(session_factory, shadow=False)
@@ -125,7 +140,10 @@ async def test_passed_auto_notifies_customer_and_reacts(session_factory):
 
     await engine.handle_checker_reply(ADMIN_ID, "bor")
 
-    assert cb.reactions == [(ADMIN_ID, GROUP_ID, GROUP_MSG_ID, "👍")]
+    assert _group_reactions(cb) == [(ADMIN_ID, GROUP_ID, GROUP_MSG_ID, "👍")]
+    # Mijoz lichkasidagi BIRINCHI rasmga ham o'sha natija qo'yiladi —
+    # admin lichkada ham "o'tdimi?" degan savolga javob ko'radi.
+    assert _dm_reactions(cb) == [(ADMIN_ID, TG_ID, 1, "👍")]
     assert len(cb.customer) == 1
     assert cb.customer[0][1] == TG_ID
     async with session_factory() as session:
@@ -333,7 +351,7 @@ async def test_t6_all_batches_of_a_case_get_outcome_and_reaction(
     assert all(b.outcome == BatchOutcome.PASSED for b in batches), (
         "faqat oxirgi partiya belgilandi — qolganlari PENDING qoldi"
     )
-    reacted = {r[2] for r in cb.reactions}
+    reacted = {r[2] for r in _group_reactions(cb)}
     assert reacted == {GROUP_MSG_ID, GROUP_MSG_ID + 6, GROUP_MSG_ID + 12}
 
 
@@ -382,6 +400,9 @@ async def test_t6_batch_without_group_post_is_skipped(session_factory, no_pause)
             await session.execute(select(ScreenshotBatch).order_by(ScreenshotBatch.id))
         ).scalars().all()
 
-    # Ikkovi ham natija oladi, lekin reaksiya faqat guruhdagisiga.
+    # Ikkovi ham natija oladi, lekin GURUH reaksiyasi faqat guruhdagisiga.
     assert all(b.outcome == BatchOutcome.PASSED for b in batches)
-    assert cb.reactions == [(ADMIN_ID, GROUP_ID, GROUP_MSG_ID, "👍")]
+    assert _group_reactions(cb) == [(ADMIN_ID, GROUP_ID, GROUP_MSG_ID, "👍")]
+    # Lichkadagi rasmga esa ikkovi ham reaksiya oladi — u guruhga
+    # tushgan-tushmaganiga bog'liq emas.
+    assert {r[2] for r in _dm_reactions(cb)} == {1, 55}
