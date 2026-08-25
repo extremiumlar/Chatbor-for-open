@@ -46,11 +46,24 @@ class Settings:
         default_factory=lambda: _int_env("CUSTOMER_COUPON_TIMEOUT_SECONDS", 300)
     )
 
-    # TZ 4.1 (Q46) — haqiqiy O'zbekiston operator kodlari ro'yxati
+    # TZ 4.1 (Q46) — haqiqiy O'zbekiston operator kodlari ro'yxati.
+    #
+    # DIQQAT: bu ro'yxatda yo'q kod NOMER DEB TANILMAYDI — mijoz nomer
+    # yozsa ham case ochilmaydi, admin rasm tashlasa guruhga tushmaydi,
+    # va HECH QANDAY xato chiqmaydi (tizim uni oddiy matn deb biladi).
+    # Jonli holat: "502526382" tanilmadi, chunki 50 ro'yxatda yo'q edi —
+    # sababni topish uchun bazani qo'lda ko'rishga to'g'ri keldi.
     uz_operator_codes: list[str] = field(
         default_factory=lambda: _list_env(
             "UZ_OPERATOR_CODES",
-            ["90", "91", "93", "94", "95", "97", "98", "99", "33", "88", "20"],
+            [
+                "90", "91",              # Beeline
+                "93", "94",              # Ucell
+                "95", "97", "98", "99",  # UMS / Mobiuz
+                "33", "88",              # Humans
+                "20",                    # Uzmobile
+                "50",                    # jonli holatda topildi (2026-08-25)
+            ],
         )
     )
 

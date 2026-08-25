@@ -101,7 +101,19 @@ class MultiClientManager:
         self, session_row: AdminSession, admin: Admin, wire_handlers: WireHandlers
     ) -> bool:
         path = os.path.join(self.sessions_dir, session_row.session_name)
-        client = TelegramClient(path, self.api_id, self.api_hash)
+        # `catch_up=True` — jarayon O'CHIQ turgan paytda kelgan xabarlarni
+        # qayta ishlash uchun MAJBURIY.
+        #
+        # Standart holatda (False) Telethon faqat ulangandan KEYINGI
+        # xabarlarni ko'radi: restart oralig'ida mijoz nomer yozsa, u
+        # butunlay yo'qoladi — case ochilmaydi, admin rasm tashlasa
+        # guruhga tushmaydi, va HECH QANDAY xato chiqmaydi. Jonli holatda
+        # aynan shunday bo'ldi: 20:58:31 da qayta ishga tushirildi,
+        # 20:59 dagi ovoz esa hech qayerda qayd etilmadi.
+        #
+        # Bu VDS'da yanada muhim: har yangilanish, har qulash restartga
+        # olib keladi.
+        client = TelegramClient(path, self.api_id, self.api_hash, catch_up=True)
         # TZ v2 4.4 — flood himoyasi: Telegram "kutib turing" desa (60
         # soniyagacha) Telethon o'zi uxlab qayta uradi; kattaroq kutishlar
         # xato sifatida ko'tariladi va tegishli joyda alert beriladi.
@@ -148,6 +160,21 @@ class MultiClientManager:
         await self._refresh_identity(client, admin, managed)
 
         wire_handlers(client, admin)
+
+        # Handler'lar O'RNATILGANDAN KEYIN chaqiriladi — aks holda
+        # o'tkazib yuborilgan xabarlar hech kim tinglamayotgan paytda
+        # kelib, yana yo'qolardi.
+        try:
+            await client.catch_up()
+        except Exception:
+            log.warning(
+                "Admin %s uchun o'tkazib yuborilgan xabarlarni olishda xato — "
+                "xizmat baribir ishlaydi, faqat uzilish oralig'idagi xabarlar "
+                "qayta ishlanmasligi mumkin.",
+                admin.id,
+                exc_info=True,
+            )
+
         await self._set_status(managed, SessionStatus.CONNECTED, error=None)
         self.clients[admin.id] = managed
         log.info(

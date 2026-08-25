@@ -827,3 +827,76 @@ async def test_k3_shadow_on_does_not_warn(shadow_env, session_factory):
 
     assert value is True
     assert "shablon" not in said[0]
+
+
+# --------------------------------------------------------------------------- #
+# Operator kodlari — ro'yxatda yo'q kod JIMGINA yo'qoladi
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "kod", ["90", "91", "93", "94", "95", "97", "98", "99", "33", "88", "20", "50"]
+)
+def test_every_configured_operator_code_is_recognised(kod):
+    """Ro'yxatdagi har kod haqiqatan tanilishi kerak.
+
+    Jonli holat: mijoz "502526382" yozdi, 50 kodi ro'yxatda yo'q edi —
+    tizim uni oddiy matn deb bildi, case ochilmadi, admin rasm tashlaganda
+    guruhga tushmadi va HECH QANDAY xato chiqmadi. Sababni topish uchun
+    bazani qo'lda ko'rishga to'g'ri keldi.
+    """
+    from core.config import settings
+    from core.logic.phone import extract_phone
+
+    nomer = f"{kod}1234567"
+    assert extract_phone(nomer, settings.uz_operator_codes) == f"998{nomer}"
+
+
+def test_operator_code_50_is_present():
+    """Aynan shu kod jonli sinovda yetishmadi."""
+    from core.config import settings
+
+    assert "50" in settings.uz_operator_codes
+
+
+def test_unknown_code_is_not_treated_as_a_phone():
+    """Teskari tomon: ro'yxatda yo'q kod nomer deb qabul qilinmasin —
+    aks holda oddiy 9 xonali son case ochib yuborardi."""
+    from core.config import settings
+    from core.logic.phone import extract_phone
+
+    assert extract_phone("111234567", settings.uz_operator_codes) is None
+
+
+def test_telethon_client_catches_up_after_restart():
+    """Jarayon o'chiq turgan paytdagi xabarlar yo'qolmasligi kerak.
+
+    `catch_up=True` bo'lmasa Telethon faqat ulangandan KEYINGI xabarlarni
+    ko'radi. Jonli holat: 20:58:31 da restart, 20:59 dagi ovoz hech
+    qayerda qayd etilmadi. VDS'da har yangilanish restart demak.
+    """
+    import ast
+    import pathlib
+
+    manba = pathlib.Path("teleton_service/multi_client.py").read_text(encoding="utf-8")
+    daraxt = ast.parse(manba)
+
+    qurilgan = [
+        node
+        for node in ast.walk(daraxt)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "TelegramClient"
+    ]
+    assert qurilgan, "TelegramClient qurilishi topilmadi"
+    for c in qurilgan:
+        kalitlar = {kw.arg: kw for kw in c.keywords}
+        assert "catch_up" in kalitlar, (
+            "TelegramClient `catch_up=True`siz qurilyapti — restart "
+            "oralig'idagi mijoz xabarlari jimgina yo'qoladi"
+        )
+
+    # Handler'lar o'rnatilgandan KEYIN chaqirilishi ham muhim.
+    assert "await client.catch_up()" in manba
+    assert manba.index("wire_handlers(client, admin)") < manba.index(
+        "await client.catch_up()"
+    ), "catch_up handler'lardan OLDIN chaqirilyapti — xabarlarni hech kim tinglamaydi"
