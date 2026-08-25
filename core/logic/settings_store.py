@@ -169,6 +169,45 @@ async def set_checker_account(session: AsyncSession, value: str) -> None:
     await set_setting(session, CHECKER_ACCOUNT_KEY, value.strip().lstrip("@"))
 
 
+# --------------------------------------------------------------------------- #
+# Tekshiruvchi BOT rejimi
+# --------------------------------------------------------------------------- #
+#
+# Tekshiruvchi odam bo'lsa — nomer uning lichkasiga oddiy matn bo'lib ketadi.
+# Bot bo'lsa (masalan @ovoztekshiruvchi_bot) — undan oldin inline menyudan
+# o'tish kerak (`teleton_service/checker_bot.py` ga qarang).
+#
+# Bot obunasi BITTA akkauntga bog'langan, shuning uchun barcha so'rovlar shu
+# akkauntdan ketadi — case qaysi adminniki bo'lishidan qat'i nazar.
+
+CHECKER_BOT_MODE_KEY = "CHECKER_BOT_MODE"
+CHECKER_RELAY_ADMIN_KEY = "CHECKER_RELAY_ADMIN_ID"
+CHECKER_BOT_PROJECT_KEY = "CHECKER_BOT_PROJECT"
+
+
+async def is_checker_bot_mode(session: AsyncSession) -> bool:
+    return (await get_setting(session, CHECKER_BOT_MODE_KEY, "0")).strip() == "1"
+
+
+async def set_checker_bot_mode(session: AsyncSession, enabled: bool) -> None:
+    await set_setting(session, CHECKER_BOT_MODE_KEY, "1" if enabled else "0")
+
+
+async def get_checker_relay_admin_id(session: AsyncSession) -> int | None:
+    """Bot bilan gaplashadigan YAGONA admin akkaunti (ichki `admins.id`)."""
+    raw = (await get_setting(session, CHECKER_RELAY_ADMIN_KEY, "")).strip()
+    return int(raw) if raw.isdigit() else None
+
+
+async def set_checker_relay_admin_id(session: AsyncSession, admin_id: int) -> None:
+    await set_setting(session, CHECKER_RELAY_ADMIN_KEY, str(admin_id))
+
+
+async def get_checker_bot_project(session: AsyncSession) -> str:
+    """Bot menyusidagi loyiha kaliti (`project:view:<slug>` dagi slug)."""
+    return (await get_setting(session, CHECKER_BOT_PROJECT_KEY, "p1")).strip() or "p1"
+
+
 async def get_drip_interval_seconds(session: AsyncSession) -> float:
     raw = await get_setting(session, DRIP_INTERVAL_KEY, "20")
     try:

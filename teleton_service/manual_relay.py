@@ -43,6 +43,9 @@ from core.logic.v2_stats import (
 )
 from core.logic.settings_store import (
     get_checker_account,
+    get_checker_bot_project,
+    get_checker_relay_admin_id,
+    is_checker_bot_mode,
     get_daily_report_time,
     get_drip_interval_seconds,
     get_group_chat_id,
@@ -63,6 +66,7 @@ from core.models import (
 )
 from sqlalchemy import select
 from teleton_service.batch_collector import BatchCollector
+from teleton_service.checker_bot import CheckerBotError, CheckerBotNavigator
 from teleton_service.multi_client import MultiClientManager
 
 # DIQQAT: `configure_logging` `main()` ichida — T-16 ga qarang (modul
@@ -120,16 +124,39 @@ def is_service_account(tg_user_id: int) -> bool:
     return tg_user_id in _admin_tg_ids
 
 
+# Tekshiruvchi bot navigatorlari: admin_id -> CheckerBotNavigator.
+# Har relay akkaunt uchun bitta — navigator ichida qulf bor, ya'ni bir
+# vaqtda bitta sikl ishlaydi (bot holatli).
+_checker_navigators: dict[int, CheckerBotNavigator] = {}
+
+
 async def _send_to_checker(admin_id: int, text: str) -> int | None:
-    """CheckEngine uchun: so'rovni O'SHA ADMINNING akkauntidan tekshiruvchi
-    lichkaga yuboradi (TZ v2 6.3). Muvaffaqiyatsiz bo'lsa None — so'rov
-    navbatda qoladi."""
-    managed = multi.clients.get(admin_id)
-    if managed is None or not managed.client.is_connected():
-        return None
+    """CheckEngine uchun: so'rovni tekshiruvchiga yuboradi.
+
+    Ikki rejim:
+
+    * ODAM (standart) — nomer O'SHA ADMINNING akkauntidan tekshiruvchi
+      lichkaga oddiy matn bo'lib ketadi (TZ v2 6.3);
+    * BOT — nomer YAGONA relay akkauntdan ketadi va undan oldin bot
+      menyusidan o'tiladi (`checker_bot.py`). Bot obunasi bitta akkauntga
+      bog'langani uchun case qaysi adminniki bo'lishi ahamiyatsiz.
+
+    Muvaffaqiyatsiz bo'lsa None — so'rov navbatda qoladi va keyingi drip
+    urinishida qayta uriniladi.
+    """
     async with get_session() as session:
         checker = await get_checker_account(session)
+        bot_rejim = await is_checker_bot_mode(session)
+        relay_id = await get_checker_relay_admin_id(session)
+        loyiha = await get_checker_bot_project(session)
     if checker is None:
+        return None
+
+    if bot_rejim:
+        return await _send_via_checker_bot(relay_id or admin_id, checker, loyiha, text)
+
+    managed = multi.clients.get(admin_id)
+    if managed is None or not managed.client.is_connected():
         return None
     try:
         entity = int(checker) if checker.lstrip("-").isdigit() else checker
@@ -141,6 +168,45 @@ async def _send_to_checker(admin_id: int, text: str) -> int | None:
             admin_id,
             checker,
         )
+        return None
+
+
+async def _send_via_checker_bot(
+    relay_admin_id: int, bot_username: str, project: str, phone: str
+) -> int | None:
+    """Nomerni tekshiruvchi BOT menyusidan o'tkazib yuboradi."""
+    managed = multi.clients.get(relay_admin_id)
+    if managed is None or not managed.client.is_connected():
+        log.warning(
+            "Tekshiruvchi bot uchun relay akkaunt (admin_id=%s) ulanmagan — "
+            "so'rov navbatda qoldi.",
+            relay_admin_id,
+        )
+        return None
+
+    navigator = _checker_navigators.get(relay_admin_id)
+    if navigator is None or navigator.bot_username != bot_username:
+        navigator = CheckerBotNavigator(managed.client, bot_username, project)
+        _checker_navigators[relay_admin_id] = navigator
+    navigator.project_slug = project
+
+    try:
+        return await navigator.send_number(phone)
+    except CheckerBotError as exc:
+        # Menyu kutilganidek ketmadi (bot yangilangan, obuna tugagan,
+        # tarmoq uzilgan). So'rov navbatda qoladi va keyingi drip
+        # urinishida qayta uriniladi — lekin superadmin bilishi kerak,
+        # aks holda so'rovlar jimgina to'planib qolardi.
+        log.warning("Tekshiruvchi bot navigatsiyasi uzildi: %s", exc)
+        await notifier.send(
+            f"⚠️ Tekshiruvchi bot bilan ishlashda muammo: {exc}\n\n"
+            f"So'rov navbatda qoldi, qayta uriniladi. Bot menyusi "
+            f"o'zgargan bo'lsa, sozlamani yangilash kerak.",
+            important=True,
+        )
+        return None
+    except Exception:
+        log.exception("Tekshiruvchi botga yuborishda kutilmagan xato")
         return None
 
 
