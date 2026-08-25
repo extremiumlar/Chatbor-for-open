@@ -246,6 +246,30 @@ _image_hint_sent: dict[tuple[int, int], datetime.datetime] = {}
 _IMAGE_HINT_COOLDOWN_MINUTES = 10
 
 
+def _is_screenshot(event) -> bool:
+    """Admin yuborgan xabar SKRINSHOTMI (partiyaga yig'ilishi kerakmi).
+
+    Telegram rasmni IKKI XIL yuboradi:
+      * "rasm sifatida"  -> `event.photo` (siqilgan);
+      * "fayl sifatida"  -> `event.document`, mime `image/...` (siqilmagan).
+
+    Avval faqat birinchisi ushlanardi. Jonli sinovda admin skrinshotni
+    fayl qilib tashlaganda tizim uni UMUMAN ko'rmadi: partiya yozilmadi,
+    guruhga tushmadi, logda esa hech qanday iz qolmadi (na muvaffaqiyat,
+    na xato) — shuning uchun sababni topish qiyin bo'ldi.
+
+    Faqat RASM mime turlari qabul qilinadi: admin mijozga PDF yoki arxiv
+    yuborsa, u skrinshot emas va guruhga forward qilinmasligi kerak.
+    """
+    if getattr(event, "photo", None):
+        return True
+    hujjat = getattr(event, "document", None)
+    if hujjat is None:
+        return False
+    mime = (getattr(hujjat, "mime_type", "") or "").lower()
+    return mime.startswith("image/")
+
+
 def _reply_target(messages: list) -> int | None:
     """Partiyadagi xabarlardan reply manzilini oladi.
 
@@ -723,7 +747,7 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
         - /check -> tekshiruvni darhol boshlash (B-3, hali skelet)
         """
         try:
-            if event.photo:
+            if _is_screenshot(event):
                 # §5.1 — partiyaga yig'ish: albom (grouped_id) yoki N-soniyalik
                 # oyna. Faol case sharti ScreenshotFlow ichida tekshiriladi.
                 collector.add(
