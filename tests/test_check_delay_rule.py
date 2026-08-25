@@ -1,14 +1,16 @@
-"""QAT'IY QOIDA — rasm tashlangandan 1 soat 10 daqiqa o'tmasdan tekshirilmaydi.
+"""QOIDA — AVTOMATIK tekshiruv rasm tashlangandan 1 soat 10 daqiqa o'tmasdan
+ishga tushmaydi.
 
 Sabab texnik emas, tashqi tizimda: ovoz tekshiruvchining bazasiga darhol
 tushmaydi. Erta so'ralsa "bazada yo'q" javobi keladi va tizim buni O'TMADI
-deb yozadi — mijozning ovozi aslida o'tgan bo'lsa ham. Ya'ni erta so'rov
-noto'g'ri natija YARATADI, shunchaki foydasiz emas.
+deb yozadi — mijozning ovozi aslida o'tgan bo'lsa ham.
 
-Shuning uchun chegara ikki qatlamda:
-  1. `get_check_delay_minutes` — sozlama undan past tusha olmaydi
-     (avtomatik taymer shundan oladi);
-  2. `request_check(..., MANUAL)` — qo'lda `/check` rad etiladi.
+Bu chegara faqat AVTOMATIK yo'lda qat'iy: `get_check_delay_minutes` sozlamasi
+undan past tusha olmaydi, va CHECK_DUE taymeri shundan oladi.
+
+QO'LDA `/check` esa (foydalanuvchi qarori) bu chegarani CHETLAB O'TADI —
+admin xohlagan payt tezlashtira oladi, hatto 1 soat 10 daqiqa to'lmagan
+bo'lsa ham. Xavfi bor, lekin bu ataylab qabul qilingan risk.
 """
 
 import datetime
@@ -107,7 +109,7 @@ async def test_scheduled_check_uses_the_floor(session_factory):
 
 
 # --------------------------------------------------------------------------- #
-# 2-qatlam: qo'lda /check rad etiladi
+# Qo'lda /check chegarani CHETLAB O'TADI (foydalanuvchi qarori)
 # --------------------------------------------------------------------------- #
 
 
@@ -137,9 +139,11 @@ async def _case_with_batch(session_factory, yosh_daqiqa: int):
     return outcome.case
 
 
-@pytest.mark.parametrize("yosh", [0, 5, 30, 69])
-async def test_manual_check_is_refused_before_the_limit(session_factory, yosh):
-    """Eng xavfli yo'l: admin sabri chidamay darhol /check qiladi."""
+@pytest.mark.parametrize("yosh", [0, 5, 30, 69, 70, 200])
+async def test_manual_check_always_sends_immediately(session_factory, yosh):
+    """Foydalanuvchi qarori: qo'lda /check hech qachon rad etilmaydi —
+    rasm necha daqiqa oldin tashlangan bo'lishidan qat'iy nazar, so'rov
+    darhol tekshiruvchiga ketadi."""
     case = await _case_with_batch(session_factory, yosh)
     sender = _FakeSender()
     engine = CheckEngine(
@@ -150,43 +154,13 @@ async def test_manual_check_is_refused_before_the_limit(session_factory, yosh):
 
     javob = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
 
-    assert "erta" in javob.lower()
-    assert "1 soat 10 daqiqa" in javob
-    await engine.drip_tick()
-    assert sender.sent == [], "erta bo'lsa ham tekshiruvchiga so'rov ketdi!"
-
-
-@pytest.mark.parametrize("yosh", [70, 71, 200])
-async def test_manual_check_allowed_after_the_limit(session_factory, yosh):
-    case = await _case_with_batch(session_factory, yosh)
-    engine = CheckEngine(
-        session_factory=session_factory,
-        alert_sink=_noop_alert,
-        send_to_checker=_FakeSender(),
-    )
-
-    javob = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
-
     assert "erta" not in javob.lower()
-
-
-async def test_refusal_says_how_long_is_left(session_factory):
-    """Admin nima qilishini bilishi kerak — qancha qolganini aytadi."""
-    case = await _case_with_batch(session_factory, 50)
-    engine = CheckEngine(
-        session_factory=session_factory,
-        alert_sink=_noop_alert,
-        send_to_checker=_FakeSender(),
-    )
-
-    javob = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
-
-    assert "20 daqiqa" in javob  # 70 - 50
+    await engine.drip_tick()
+    assert len(sender.sent) == 1, "so'rov tekshiruvchiga ketmadi"
 
 
 async def test_case_without_screenshots_is_not_blocked(session_factory):
-    """Rasm umuman tashlanmagan case'da cheklash mantiqsiz — kutiladigan
-    rasm yo'q, va bloklash adminni ishlay olmaydigan holatga tushirardi."""
+    """Rasm umuman tashlanmagan case'da ham /check ishlaydi."""
     async with session_factory() as session:
         session.add(Admin(id=ADMIN_ID, tg_user_id=901, name="Aziz"))
         await set_checker_account(session, "checker_user")
@@ -203,24 +177,6 @@ async def test_case_without_screenshots_is_not_blocked(session_factory):
     javob = await engine.request_check(outcome.case.id, CheckTrigger.MANUAL, ADMIN_ID)
 
     assert "erta" not in javob.lower()
-
-
-async def test_timer_anchors_to_the_LAST_screenshot(session_factory):
-    """§6.1a — admin rasmni qayta tashlasa, hisob OXIRGI rasmdan boshlanadi."""
-    case = await _case_with_batch(session_factory, 200)  # eski partiya
-
-    # Yangi partiya — hozir tashlandi.
-    flow = ScreenshotFlow(session_factory=session_factory, alert_sink=_noop_alert)
-    await flow.register_batch(ADMIN_ID, "Aziz", TG_ID, [2], 1)
-
-    engine = CheckEngine(
-        session_factory=session_factory,
-        alert_sink=_noop_alert,
-        send_to_checker=_FakeSender(),
-    )
-    javob = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
-
-    assert "erta" in javob.lower(), "eski partiyaga qarab ruxsat berildi"
 
 
 # --------------------------------------------------------------------------- #

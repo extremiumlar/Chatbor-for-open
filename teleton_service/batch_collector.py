@@ -35,12 +35,23 @@ class BatchCollector:
     def __init__(self, on_ready: BatchReady, window_seconds: float = 15.0) -> None:
         self.on_ready = on_ready
         self.window_seconds = window_seconds
-        # (chat_id, grouped_id | None) -> yig'ilayotgan partiya
-        self._pending: dict[tuple[int, int | None], _Pending] = {}
+        # (chat_id, grouped_id | None, reply_to_msg_id | None) -> yig'ilayotgan partiya
+        self._pending: dict[tuple[int, int | None, int | None], _Pending] = {}
 
     def add(self, chat_id: int, message: Any, grouped_id: int | None = None) -> None:
-        """Yangi chiquvchi rasm keldi — mos partiyaga qo'shadi."""
-        key = (chat_id, grouped_id)
+        """Yangi chiquvchi rasm keldi — mos partiyaga qo'shadi.
+
+        Yakka (albom emas) rasmlar REPLY manzili bo'yicha ham ajratiladi:
+        agar admin ketma-ket ikkita TURLI xabarga (masalan ikki xil mijoz
+        nomeriga) reply qilib rasm tashlasa, ular endi bitta partiyaga
+        QO'SHILIB KETMAYDI — har biri o'z partiyasida qoladi va o'z
+        case'iga bog'lanadi. Avval bittasiga birlashtirib, faqat birinchi
+        reply saqlanib qolar, ikkinchi nomer rasmsiz qolib ketardi. Reply
+        yo'q bo'lgan rasmlar (odatiy holat) avvalgidek bitta oynaga
+        yig'iladi.
+        """
+        reply_to = None if grouped_id is not None else getattr(message, "reply_to_msg_id", None)
+        key = (chat_id, grouped_id, reply_to)
         pending = self._pending.get(key)
 
         if pending is None:
@@ -59,7 +70,9 @@ class BatchCollector:
         # qayta boshlanmaydi — aks holda admin sekin tashlasa oyna cheksiz
         # cho'zilib ketardi.
 
-    async def _finalize_later(self, key: tuple[int, int | None], grouped_id: int | None) -> None:
+    async def _finalize_later(
+        self, key: tuple[int, int | None, int | None], grouped_id: int | None
+    ) -> None:
         try:
             delay = _ALBUM_DEBOUNCE_SECONDS if grouped_id is not None else self.window_seconds
             await asyncio.sleep(delay)

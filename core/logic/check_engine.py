@@ -35,7 +35,6 @@ from core.logic.check_patterns import (
     missing_categories,
 )
 from core.logic.settings_store import (
-    MIN_CHECK_DELAY_MINUTES,
     get_check_cache_minutes,
     get_check_request_template,
     get_checker_account,
@@ -49,7 +48,6 @@ from core.models import (
     CheckTrigger,
     JobKind,
     ScheduledJob,
-    ScreenshotBatch,
 )
 
 log = logging.getLogger("check_engine")
@@ -120,33 +118,19 @@ class CheckEngine:
 
             now = datetime.datetime.utcnow()
 
-            # QAT'IY CHEGARA — rasm tashlanganidan keyin 1 soat 10 daqiqa
-            # o'tmaguncha tekshiruvchiga so'rov ketmaydi: erta so'ralgan ovoz
-            # "bazada yo'q" javobini oladi va tizim uni O'TMADI deb yozadi.
+            # Avtomatik yo'lda vaqtni CHECK_DUE taymeri belgilaydi va u
+            # `get_check_delay_minutes`dan oladi — u yerda
+            # `MIN_CHECK_DELAY_MINUTES` poli qo'yilgan, ya'ni AVTOMATIK
+            # so'rov 1 soat 10 daqiqadan erta kela olmaydi.
             #
-            # Tekshiruv faqat QO'LDA chaqirilganda: avtomatik yo'lda vaqtni
-            # CHECK_DUE taymeri belgilaydi va u `get_check_delay_minutes`
-            # dan oladi — u yerda `MIN_CHECK_DELAY_MINUTES` poli qo'yilgan,
-            # ya'ni avtomatik so'rov allaqachon erta kela olmaydi. AUTO'ni
-            # bu yerda ham to'sish esa zararli bo'lardi: vaqti kelib ishga
-            # tushgan ish sekundlik farq tufayli rad etilib, case abadiy
-            # tekshirilmay qolishi mumkin edi.
-            qolgan = (
-                await self._minutes_until_check_allowed(session, case.id, now)
-                if trigger == CheckTrigger.MANUAL
-                else 0
-            )
-            if qolgan > 0:
-                return (
-                    f"⏳ Hali erta — rasm tashlanganiga "
-                    f"{MIN_CHECK_DELAY_MINUTES - qolgan} daqiqa bo'ldi.\n\n"
-                    f"Tekshiruv rasm tashlangandan <b>1 soat 10 daqiqa</b> keyin "
-                    f"boshlanadi: ovoz tekshiruvchining bazasiga darhol tushmaydi, "
-                    f"erta so'rasak \"bazada yo'q\" javobi keladi va tizim buni "
-                    f"noto'g'ri O'TMADI deb yozadi.\n\n"
-                    f"Yana <b>{qolgan} daqiqa</b> kuting — yoki hech narsa "
-                    f"qilmang, vaqti kelganda tizim o'zi tekshiradi."
-                )
+            # QO'LDA `/check` esa (foydalanuvchi qarori) bu chegarani
+            # CHETLAB O'TADI — admin xohlagan payt tezlashtira oladi,
+            # hatto rasm tashlanganiga 1 soat 10 daqiqa to'lmagan bo'lsa
+            # ham. Xavfi bor (ovoz tekshiruvchining bazasiga hali
+            # tushmagan bo'lishi mumkin — "bazada yo'q" javobi kelib,
+            # tizim buni noto'g'ri O'TMADI deb yozib qo'yishi mumkin),
+            # lekin bu ataylab qabul qilingan risk (admin o'zi hal
+            # qiladi, tizim to'smaydi).
 
             # §6.6 — kesh: yaqinda AYNAN SHU nomer bo'yicha natija chiqqanmi.
             cache_minutes = await get_check_cache_minutes(session)
@@ -558,32 +542,6 @@ class CheckEngine:
             .order_by(CheckRequest.replied_at.desc())
         )
         return result.scalars().first()
-
-    async def _minutes_until_check_allowed(
-        self, session, case_id: int, now: datetime.datetime
-    ) -> int:
-        """Tekshiruvga ruxsat berilgunicha necha daqiqa qolgani.
-
-        0 yoki manfiy — hozir mumkin. Anchor: case'ning OXIRGI rasm
-        partiyasi (§6.1a — admin rasmni qayta tashlasa, hisob oxirgi
-        rasmdan boshlanadi).
-
-        Rasm umuman tashlanmagan bo'lsa 0 qaytariladi: bunday case'da
-        cheklash mantiqsiz (kutiladigan rasm yo'q), va `/check` ni
-        bloklash adminni ishlay olmaydigan holatga tushirardi.
-        """
-        oxirgi = (
-            await session.execute(
-                select(ScreenshotBatch.sent_at)
-                .where(ScreenshotBatch.case_id == case_id)
-                .order_by(ScreenshotBatch.id.desc())
-                .limit(1)
-            )
-        ).scalars().first()
-        if oxirgi is None:
-            return 0
-        o_tgan = (now - oxirgi).total_seconds() / 60
-        return max(0, int(round(MIN_CHECK_DELAY_MINUTES - o_tgan)))
 
     async def _admin_has_open_sent(self, session, admin_id: int) -> bool:
         result = await session.execute(

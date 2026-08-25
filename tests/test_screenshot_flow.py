@@ -517,3 +517,53 @@ async def test_collector_window_not_extended_by_new_messages():
     await asyncio.sleep(0.1)
 
     assert batches == [["r1", "r2"], ["r3"]]
+
+
+class _FakeMsg:
+    """Telethon xabar obyektining `reply_to_msg_id` maydonini taqlid qiladi."""
+
+    def __init__(self, text: str, reply_to_msg_id: int | None = None) -> None:
+        self.text = text
+        self.reply_to_msg_id = reply_to_msg_id
+
+    def __repr__(self) -> str:  # aniqroq test xato xabari uchun
+        return f"_FakeMsg({self.text!r}, reply_to_msg_id={self.reply_to_msg_id})"
+
+
+@pytest.mark.asyncio
+async def test_collector_splits_by_reply_target_for_different_numbers():
+    """Bitta mijoz ketma-ket ikkita TURLI nomer yozib, admin har biriga
+    alohida reply qilib rasm tashlasa — ular BITTA partiyaga qo'shilib
+    ketmasligi kerak (avval qo'shilib, faqat birinchi nomer rasmga ega
+    bo'lib qolardi, ikkinchisi rasmsiz qolardi)."""
+    batches: list[list] = []
+
+    async def on_ready(chat_id, messages):
+        batches.append(messages)
+
+    collector = BatchCollector(on_ready, window_seconds=0.05)
+    collector.add(100, _FakeMsg("rasm_A", reply_to_msg_id=111))
+    collector.add(100, _FakeMsg("rasm_B", reply_to_msg_id=222))
+    await asyncio.sleep(0.1)
+
+    assert len(batches) == 2
+    reply_targets = {b[0].reply_to_msg_id for b in batches}
+    assert reply_targets == {111, 222}
+
+
+@pytest.mark.asyncio
+async def test_collector_same_reply_target_still_groups_together():
+    """Ikkita rasm BIR XIL xabarga reply qilingan bo'lsa — avvalgidek bitta
+    partiyaga yig'iladi (bitta nomer uchun 2 ta rasm — odatiy holat)."""
+    batches: list[list] = []
+
+    async def on_ready(chat_id, messages):
+        batches.append(messages)
+
+    collector = BatchCollector(on_ready, window_seconds=0.05)
+    collector.add(100, _FakeMsg("rasm1", reply_to_msg_id=111))
+    collector.add(100, _FakeMsg("rasm2", reply_to_msg_id=111))
+    await asyncio.sleep(0.1)
+
+    assert len(batches) == 1
+    assert [m.text for m in batches[0]] == ["rasm1", "rasm2"]
