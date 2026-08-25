@@ -212,4 +212,53 @@ async def test_reply_to_an_unrelated_message_falls_back_to_warning(
         ADMIN_ID, "Aziz", TG_ID, [900], 1, reply_to_msg_id=999999
     )
 
-    assert [a for a in alerts.yozilgan if "REPLY'siz" in a]
+    assert [a for a in alerts.yozilgan if "ekanini bilmaydi" in a]
+
+
+async def test_reply_resolves_to_a_closed_case_too(session_factory, env):
+    """Foydalanuvchi talabi: reply qilingan bo'lsa, case OCHIQMI YO'QMI
+    farqi yo'q — o'sha reply qilingan nomerga rasm tushishi kerak. Case
+    allaqachon FAILED bo'lsa ham (masalan qayta tekshiruv uchun dalil
+    tashlanayotgan bo'lsa), reply orqali to'g'ridan-to'g'ri topilishi
+    kerak — hech qanday ochiq case yo'qligiga qaramay."""
+    manager, flow, alerts = env
+    await _yubor(manager, A, MSG_A)
+    async with session_factory() as session:
+        case = (await session.execute(select(Case).where(Case.phone == A))).scalars().first()
+        case.status = CaseStatus.FAILED
+        await session.commit()
+    alerts.yozilgan.clear()
+
+    decision = await flow.register_batch(
+        ADMIN_ID, "Aziz", TG_ID, [900], 1, reply_to_msg_id=MSG_A
+    )
+
+    assert not decision.no_case, "yopiq case'ga reply qilinganda ham topilishi kerak edi"
+    async with session_factory() as session:
+        result_case = await session.get(Case, decision.case_id)
+    assert result_case.phone == A
+    assert not [a for a in alerts.yozilgan if "ekanini bilmaydi" in a]
+
+
+async def test_mismatched_reply_warns_even_with_a_single_open_case(
+    session_factory, env
+):
+    """Jonli xato: mijozda FAQAT bitta (eski, chalkash) ochiq case qolgan
+    bo'lsa, admin YANGI xabarga reply qilib rasm tashlasa ham, reply hech
+    kimga mos kelmasa — tizim buni AVVAL jimgina yagona case'ga yozib
+    qo'yardi (ogohlantirmasdan). "Reply qilsam ham qilmasam ham bitta
+    (eski) nomer guruhga tushadi" shikoyati aynan shundan edi."""
+    manager, flow, alerts = env
+    await _yubor(manager, A, MSG_A)  # yagona ochiq case
+    alerts.yozilgan.clear()
+
+    decision = await flow.register_batch(
+        ADMIN_ID, "Aziz", TG_ID, [900], 1, reply_to_msg_id=999999
+    )
+
+    assert [a for a in alerts.yozilgan if "ekanini bilmaydi" in a], (
+        "reply mos kelmadi, lekin ogohlantirilmadi"
+    )
+    async with session_factory() as session:
+        case = await session.get(Case, decision.case_id)
+    assert case.phone == A  # yagona ochiq case — baribir shunga tushadi, lekin OGOHLANTIRIB

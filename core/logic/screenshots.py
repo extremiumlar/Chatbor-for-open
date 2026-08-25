@@ -276,9 +276,21 @@ class ScreenshotFlow:
         bir nechta ochiq nomer bo'lsa tizim taxmin qila olmaydi. Tartib:
 
         1. Admin mijozning NOMERLI XABARIGA reply qilgan bo'lsa — aynan
-           o'sha case (`Case.origin_message_id`). Bu yagona ANIQ usul.
-        2. Ochiq case bitta bo'lsa — noaniqlik yo'q, o'sha.
-        3. Bir nechta ochiq case bor va reply yo'q — tizim TAXMIN
+           o'sha case (`Case.origin_message_id`), CASE HOLATIDAN QAT'IY
+           NAZAR (ochiq, PASSED, FAILED — farqi yo'q). Reply — eng
+           ishonchli ko'rsatma, admin ANIQ shu nomerni ko'zlab bosgan;
+           holat filtri bu yerda ortiqcha to'siq bo'lardi (masalan mijoz
+           qayta tekshiruv uchun eski FAILED nomerga reply bilan yangi
+           dalil tashlasa ham ishlashi kerak).
+        2. Reply BERILGAN, lekin HECH QAYSI case (holatidan qat'iy nazar)
+           bilan mos kelmasa — bu ANIQ noaniqlik. Jimgina biror ochiq
+           case'ga yozib qo'yish xato: reply eskirgan/chalkash bo'lishi
+           mumkin (masalan mijozda uzoq vaqtdan beri yopilmay yotgan eski
+           case bor edi — yangi rasm reply bilan tashlansa ham, mos
+           kelmagani sababli o'sha eskisiga yozilib qolardi,
+           ogohlantirmasdan).
+        3. Reply YO'Q va ochiq case bitta — noaniqlik yo'q, o'sha.
+        4. Reply yo'q va bir nechta ochiq case bor — tizim TAXMIN
            QILMAYDI: adminga darhol ogohlantirish ketadi va partiya rasm
            kutayotgan ENG ESKI case'ga yoziladi (admin odatda nomerlarni
            kelgan tartibda ovoz beradi).
@@ -286,6 +298,24 @@ class ScreenshotFlow:
         Avval har doim "oxirgi ochiq case" olinardi — natijada ikkinchi
         nomer uchun tashlangan rasm BIRINCHI nomer bilan guruhga tushardi.
         """
+        # 1) Reply — eng ishonchli ko'rsatma, CASE HOLATIDAN qat'iy nazar.
+        reply_mismatch = False
+        if reply_to_msg_id is not None:
+            matched = (
+                await session.execute(
+                    select(Case).where(
+                        Case.user_id == user.id,
+                        Case.origin_message_id == reply_to_msg_id,
+                    )
+                )
+            ).scalars().first()
+            if matched is not None:
+                return matched
+            # Reply bor, lekin nomerli xabarga emas (masalan eski rasmga,
+            # yoki eskirgan case'ning xabari umuman saqlanmagan) — bu ham
+            # noaniqlik, ochiq case soni bittami-ko'pmi farqi yo'q.
+            reply_mismatch = True
+
         ochiq = (
             await session.execute(
                 select(Case)
@@ -296,18 +326,10 @@ class ScreenshotFlow:
         if not ochiq:
             return None
 
-        # 1) Reply — aniq ko'rsatma.
-        if reply_to_msg_id is not None:
-            for case in ochiq:
-                if case.origin_message_id == reply_to_msg_id:
-                    return case
-            # Reply bor, lekin nomerli xabarga emas (masalan eski rasmga).
-            # Bu ham noaniqlik — pastdagi shoxga tushadi.
-
-        if len(ochiq) == 1:
+        if not reply_mismatch and len(ochiq) == 1:
             return ochiq[0]
 
-        # 3) Noaniq — ogohlantiramiz va taxmin qilmasdan eng eskisini olamiz.
+        # Noaniq — ogohlantiramiz va taxmin qilmasdan eng eskisini olamiz.
         rasmsiz = [c for c in ochiq if not await self._has_batches(session, c.id)]
         tanlangan = (rasmsiz or ochiq)[0]
         nomerlar = ", ".join(
@@ -315,10 +337,20 @@ class ScreenshotFlow:
             + (" ←" if c.id == tanlangan.id else "")
             for c in ochiq
         )
+        if reply_mismatch:
+            sabab = (
+                "rasm biror xabarga REPLY qilib tashlandi, lekin u hech "
+                "qaysi ochiq nomerning boshlang'ich xabariga mos kelmadi "
+                "(eski/chalkash reply bo'lishi mumkin)"
+            )
+        else:
+            sabab = (
+                f"mijozda {len(ochiq)} ta ochiq nomer bor, rasm esa "
+                f"REPLY'siz tashlandi"
+            )
         await self.alert_sink(
-            f"⚠️ {admin_name}: mijozda {len(ochiq)} ta ochiq nomer bor, rasm esa "
-            f"REPLY'siz tashlandi — tizim qaysi biriga tegishli ekanini "
-            f"bilmaydi.\n\n"
+            f"⚠️ {admin_name}: {sabab} — tizim qaysi biriga tegishli "
+            f"ekanini bilmaydi.\n\n"
             f"Nomerlar: {nomerlar}\n"
             f"Rasm ← belgilangan nomerga yozildi.\n\n"
             f"To'g'ri bo'lishi uchun: rasmni mijozning KERAKLI NOMERLI "
