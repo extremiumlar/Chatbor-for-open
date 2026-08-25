@@ -398,12 +398,35 @@ class CheckEngine:
                 else datetime.timedelta(0)
             )
             age_min = int(age.total_seconds() // 60)
-            await self.alert_sink(
-                f"⏳ Tekshiruvchi javob bermayapti: {request.phone} "
-                f"({age_min} daqiqa). Jami javobsiz: {open_count} ta. "
-                f"So'rov navbatda qoladi — mijozga hech narsa yozilmadi.",
-                True,
-            )
+
+            # MUHIM farq: tekshiruvchi umuman JIMMI, yoki javob berdi-yu
+            # tizim uni TANIMADIMI. Ikkovi butunlay boshqa muammo va
+            # boshqa yechim talab qiladi, lekin avval ikkovi ham
+            # "javob bermayapti" deb xabar qilinardi.
+            #
+            # Oqibati jonli tizimda ko'rindi: tekshiruvchi javob berib
+            # turgan, shablonlar esa uni tanimagan — natijada 9 kun
+            # davomida birorta ham natija chiqmagan va hech kim sababni
+            # bilmagan, chunki alert "javob bermayapti" deb turgan.
+            xom = (request.raw_reply or "").strip()
+            if xom:
+                await self.alert_sink(
+                    f"❓ Tekshiruvchi JAVOB BERDI, lekin tizim uni TANIMADI "
+                    f"({request.phone}, {age_min} daqiqa).\n\n"
+                    f"Javob matni: <code>{xom[:300]}</code>\n\n"
+                    f"Shu matnni tanish shabloniga qo'shing — shundan keyin "
+                    f"bunday javoblar avtomatik ishlanadi:\n"
+                    f"<code>/unrecognized</code> — ro'yxatdan tugma bilan, yoki\n"
+                    f"<code>/testcheck {xom[:40]}</code> — avval sinab ko'ring.",
+                    True,
+                )
+            else:
+                await self.alert_sink(
+                    f"⏳ Tekshiruvchi javob bermayapti: {request.phone} "
+                    f"({age_min} daqiqa). Jami javobsiz: {open_count} ta. "
+                    f"So'rov navbatda qoladi — mijozga hech narsa yozilmadi.",
+                    True,
+                )
 
         # B-4 — guruh postiga ⏳ reaksiya.
         if self.stalled_hook is not None:

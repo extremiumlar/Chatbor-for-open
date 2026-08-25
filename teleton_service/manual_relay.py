@@ -566,7 +566,7 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
             #     nomerini allaqachon yozgan, rasmi esa oddiy suhbat.
             #  2) sovutish oralig'i — albom (5–10 rasm) bitta eslatma oladi.
             if await _has_media(event) and not await _has_open_case(tg_user_id):
-                if _image_hint_due(admin.id, chat_id, datetime.datetime.utcnow()):
+                if _image_hint_due(admin.id, event.chat_id, datetime.datetime.utcnow()):
                     async with get_session() as session:
                         hint = await get_template(session, "IMAGE_INSTEAD_OF_TEXT")
                     await _reply_customer(event, hint, "matnsiz xabar")

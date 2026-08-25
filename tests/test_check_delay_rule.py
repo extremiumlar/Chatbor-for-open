@@ -14,6 +14,7 @@ Shuning uchun chegara ikki qatlamda:
 import datetime
 
 import pytest
+from sqlalchemy import select
 
 from core.logic.check_engine import CheckEngine
 from core.logic.check_patterns import CheckCategory, add_pattern
@@ -220,3 +221,51 @@ async def test_timer_anchors_to_the_LAST_screenshot(session_factory):
     javob = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
 
     assert "erta" in javob.lower(), "eski partiyaga qarab ruxsat berildi"
+
+
+# --------------------------------------------------------------------------- #
+# Stall alerti: "javob bermadi" va "tanimadim" ni ajratishi kerak
+# --------------------------------------------------------------------------- #
+
+
+async def test_stall_alert_distinguishes_silence_from_unrecognized(session_factory):
+    """Jonli tizimda 9 kun davomida natija chiqmagan va sabab noma'lum
+    qolgan edi: tekshiruvchi javob berib turardi, shablonlar esa uni
+    tanimasdi — alert esa "javob bermayapti" deb turardi."""
+    from core.models import CheckRequest
+
+    alerts: list[str] = []
+
+    async def sink(message: str, important: bool = True) -> None:
+        alerts.append(message)
+
+    case = await _case_with_batch(session_factory, 120)
+    engine = CheckEngine(
+        session_factory=session_factory,
+        alert_sink=sink,
+        send_to_checker=_FakeSender(),
+    )
+    await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
+    await engine.drip_tick()
+
+    async with session_factory() as session:
+        req = (await session.execute(select(CheckRequest))).scalars().first()
+        request_id = req.id
+
+    # (a) Umuman javob yo'q.
+    alerts.clear()
+    await engine.handle_stalled(request_id)
+    assert any("javob bermayapti" in a for a in alerts)
+
+    # (b) Javob keldi, lekin tanilmadi.
+    async with session_factory() as session:
+        req = await session.get(CheckRequest, request_id)
+        req.raw_reply = "Kod bordi"
+        await session.commit()
+    alerts.clear()
+    await engine.handle_stalled(request_id)
+
+    ogoh = "\n".join(alerts)
+    assert "TANIMADI" in ogoh, "tanilmagan javob 'javob bermadi' deb xabar qilindi"
+    assert "Kod bordi" in ogoh, "admin javob matnini ko'rmaydi"
+    assert "/unrecognized" in ogoh, "nima qilish kerakligi aytilmadi"
