@@ -2709,14 +2709,57 @@ async def on_unknown(message: Message, current_admin: Admin) -> None:
 # --------------------------------------------------------------------------- #
 
 
+# Bir xil odamga "ruxsat yo'q" ni qayta-qayta yozmaslik uchun: tg_id -> vaqt.
+_denied_told: dict[int, datetime.datetime] = {}
+_DENIED_COOLDOWN_MINUTES = 30
+
+
 @fallback_router.message()
 async def cmd_denied(message: Message) -> None:
-    await message.answer("Sizda ruxsat yo'q.")
+    """Admin bo'lmagan odamga javob — LEKIN faqat o'rinli bo'lganda.
+
+    Bu handler `IsAdmin` o'tkazmagan HAR QANDAY xabarni ushlaydi, va aynan
+    shu yerda ikkita jiddiy nuqson bor edi:
+
+    1. GURUHDA. `should_handle_in_chat` guruhda buyruq bo'lmagan xabarni
+       to'sadi (`IsAdmin` -> False), lekin xabar shu yerga tushib
+       "Sizda ruxsat yo'q" javobini olardi. Natijada nazorat guruhiga
+       forward qilingan HAR BIR rasm caption'i shu javobni chiqarardi —
+       hatto OWNER tashlagan bo'lsa ham. Ya'ni "guruhda jim tur" qoidasi
+       amalda ishlamagan, faqat javob matni o'zgargan. Guruh toza arxiv
+       bo'lishi kerak (TZ v2 5.2).
+
+    2. LICHKADA TAKRORLANISH. Mijoz botga bir necha xabar yozsa, har
+       biriga alohida "ruxsat yo'q" ketardi.
+    """
+    if not should_handle_in_chat(message.chat.type, message.text):
+        return  # guruhda buyruq emas — mutlaq jimlik
+
+    if message.from_user is None:
+        return
+    endi = datetime.datetime.utcnow()
+    oxirgi = _denied_told.get(message.from_user.id)
+    if oxirgi is not None and (endi - oxirgi) < datetime.timedelta(
+        minutes=_DENIED_COOLDOWN_MINUTES
+    ):
+        return
+    _denied_told[message.from_user.id] = endi
+    await message.answer(
+        "Bu bot faqat xizmat adminlari uchun.\n\n"
+        "Agar ovoz berish bo'yicha murojaat qilmoqchi bo'lsangiz, "
+        "o'zingiz bog'langan adminga yozing."
+    )
 
 
 @fallback_router.callback_query()
 async def cb_denied(callback: CallbackQuery) -> None:
-    await callback.answer("Sizda ruxsat yo'q.", show_alert=True)
+    # Tugma bosilishida javob QOLADI: tugmani faqat bot xabarini ko'rgan
+    # odam bosa oladi, ya'ni bu "adashib kelgan begona" emas — eski
+    # xabardagi tugmani bosgan sobiq admin bo'lishi mumkin. Unga sababni
+    # aytish kerak, aks holda tugma "ishlamayapti" deb ko'rinadi.
+    await callback.answer(
+        "Bu bot faqat xizmat adminlari uchun.", show_alert=True
+    )
 
 
 async def main() -> None:
