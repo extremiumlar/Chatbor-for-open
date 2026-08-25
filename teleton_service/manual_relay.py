@@ -146,7 +146,11 @@ async def _send_to_checker(admin_id: int, text: str) -> int | None:
 
 # Telegram standart reaksiya to'plamida ⚠️ va ⏳ YO'Q — rad etilsa shu
 # muqobillar bilan qayta uriniladi (ma'nosi yaqin, to'plamda mavjud).
-_REACTION_FALLBACK = {"⚠️": "🤔", "⏳": "😴"}
+# Telegram ruxsat etmaydigan emojilar uchun zaxira. Asosiy jadval
+# (`REACTION_BY_OUTCOME`) endi darhol ruxsat etilganini beradi, shuning
+# uchun bular amalda ishlamaydi — lekin kimdir jadvalni o'zgartirsa yoki
+# guruhda reaksiyalar ro'yxati cheklangan bo'lsa, himoya bo'lib qoladi.
+_REACTION_FALLBACK = {"⚠️": "🤔", "⏳": "😴", "👍": "❤️", "👎": "💔"}
 
 
 async def _set_reaction(
@@ -170,11 +174,18 @@ async def _set_reaction(
             )
             return True
         except Exception:
-            log.warning(
-                "Reaksiya qo'yilmadi (chat=%s, msg=%s, emoji=%s)",
+            # Zaxira emoji hali sinalmagan bo'lsa — bu hali muvaffaqiyatsizlik
+            # emas, shuning uchun WARNING emas. Avval har urinish WARNING
+            # yozardi va logda "Reaksiya qo'yilmadi" ko'rinardi, holbuki
+            # keyingi urinish muvaffaqiyatli bo'lardi — bu haqiqiy nosozlik
+            # qidirayotgan odamni chalg'itardi.
+            oxirgi_urinish = attempt_emoji != emoji or emoji not in _REACTION_FALLBACK
+            (log.warning if oxirgi_urinish else log.info)(
+                "Reaksiya qo'yilmadi (chat=%s, msg=%s, emoji=%s)%s",
                 chat_id,
                 message_id,
                 attempt_emoji,
+                "" if oxirgi_urinish else " — zaxira emoji bilan urinamiz",
             )
     return False
 

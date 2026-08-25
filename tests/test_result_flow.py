@@ -207,7 +207,9 @@ async def test_unrecognized_reacts_warning_no_customer(session_factory):
 
     assert cb.customer == []
     assert cb.confirmations == []
-    assert cb.reactions[0][3] == "⚠️"
+    # 🤔 — Telegram ⚠️ ni reaksiya sifatida qabul qilmaydi (jonli loglar
+    # bilan tasdiqlangan), shuning uchun asosiy emoji almashtirildi.
+    assert cb.reactions[0][3] == "🤔"
     async with session_factory() as session:
         batch = (await session.execute(select(ScreenshotBatch))).scalars().first()
     assert batch.outcome == BatchOutcome.UNKNOWN
@@ -222,7 +224,8 @@ async def test_stalled_reacts_hourglass(session_factory):
         req = (await session.execute(select(CheckRequest))).scalars().first()
     await engine.handle_stalled(req.id)
 
-    assert cb.reactions[-1][3] == "⏳"
+    # 😴 — ⏳ ham Telegram ruxsat etgan to'plamda yo'q.
+    assert cb.reactions[-1][3] == "😴"
     async with session_factory() as session:
         batch = (await session.execute(select(ScreenshotBatch))).scalars().first()
     assert batch.outcome == BatchOutcome.STALLED

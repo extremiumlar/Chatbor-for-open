@@ -104,8 +104,29 @@ async def get_no_screenshot_reminders(session: AsyncSession) -> int:
     )
 
 
+# =========================================================================== #
+# QAT'IY QOIDA — tekshiruvgacha eng kam kutish vaqti
+# =========================================================================== #
+#
+# Rasm tashlangandan keyin tekshiruvchi akkauntga so'rov 1 soat 10 daqiqadan
+# ILGARI ketmasligi SHART. Sabab texnik emas, tashqi tizimda: ovoz
+# tekshiruvchining bazasiga darhol tushmaydi. Erta so'ralsa tekshiruvchi
+# "bazada yo'q" deb javob beradi va tizim buni O'TMADI deb yozadi — mijozning
+# ovozi aslida o'tgan bo'lsa ham.
+#
+# Shuning uchun bu QATTIQ CHEGARA, sozlama emas: `CHECK_DELAY_MINUTES` ni
+# kimdir pasaytirib qo'ysa ham, quyidagi qiymatdan past tusha olmaydi.
+# Sozlama faqat KATTAROQ qiymat berishi mumkin.
+MIN_CHECK_DELAY_MINUTES = 70
+
+
 async def get_check_delay_minutes(session: AsyncSession) -> int:
-    return await _get_int_setting(session, CHECK_DELAY_KEY, settings.check_delay_minutes)
+    """Tekshiruvgacha kutish (daqiqa) — HECH QACHON `MIN_CHECK_DELAY_MINUTES`
+    dan past bo'lmaydi (yuqoridagi izohga qarang)."""
+    configured = await _get_int_setting(
+        session, CHECK_DELAY_KEY, settings.check_delay_minutes
+    )
+    return max(configured, MIN_CHECK_DELAY_MINUTES)
 
 
 async def get_group_chat_id(session: AsyncSession) -> int | None:

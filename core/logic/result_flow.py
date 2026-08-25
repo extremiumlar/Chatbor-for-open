@@ -54,11 +54,18 @@ SendCustomer = Callable[[int, int, str], Awaitable[bool]]
 FailedConfirmation = Callable[[str, int], Awaitable[None]]
 AlertSink = Callable[[str, bool], Awaitable[None]]
 
+# DIQQAT: Telegram reaksiya uchun FAQAT ruxsat etilgan emojilar to'plamini
+# qabul qiladi. ⏳ va ⚠️ o'sha to'plamda YO'Q — jonli loglar buni tasdiqladi
+# (9 urinishning 9 tasi ⏳ da rad etilgan). Pastdagi `_REACTION_FALLBACK`
+# tufayli natija baribir qo'yilardi, lekin har safar bitta ortiqcha API
+# chaqiruvi va logda chalg'ituvchi "Reaksiya qo'yilmadi" ogohlantirishi
+# paydo bo'lardi. Shuning uchun asosiy qiymat sifatida darhol ruxsat
+# etilganini ishlatamiz.
 REACTION_BY_OUTCOME = {
     BatchOutcome.PASSED: "👍",
     BatchOutcome.FAILED: "👎",
-    BatchOutcome.UNKNOWN: "⚠️",
-    BatchOutcome.STALLED: "⏳",
+    BatchOutcome.UNKNOWN: "🤔",   # avval ⚠️ edi — Telegram qabul qilmaydi
+    BatchOutcome.STALLED: "😴",   # avval ⏳ edi — Telegram qabul qilmaydi
 }
 
 _OUTCOME_BY_RESULT = {

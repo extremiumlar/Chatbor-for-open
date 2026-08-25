@@ -59,13 +59,35 @@ async def _seed_ready(session_factory):
         await set_checker_account(session, "checker_user")
 
 
-async def _open_case_with_screenshots(session_factory, tg_id=TG_ID, phone=PHONE):
+async def _open_case_with_screenshots(
+    session_factory, tg_id=TG_ID, phone=PHONE, screenshot_age_minutes: int = 120
+):
+    """Rasm tashlangan ochiq case.
+
+    `screenshot_age_minutes` — rasm qancha vaqt oldin tashlangani. Standart
+    qiymat qat'iy chegaradan (`MIN_CHECK_DELAY_MINUTES` = 70 daqiqa) katta:
+    aks holda qo'lda `/check` rad etilardi va bu testlar tekshirmoqchi
+    bo'lgan mantiqqa (navbat, kesh, dublikat) umuman yetib bormasdi.
+    Chegaraning O'ZI `test_check_delay_rule.py` da alohida tekshiriladi.
+    """
+    import datetime as _dt
+
+    from core.models import ScreenshotBatch as _Batch
+
     manager = ManualCaseManager(session_factory=session_factory)
     outcome = await manager.handle_phone_detected(ADMIN_ID, tg_id, "u", "M", phone)
     async with session_factory() as session:
         await set_group_chat_id(session, -100555)
     flow = ScreenshotFlow(session_factory=session_factory, alert_sink=_noop_alert)
-    await flow.register_batch(ADMIN_ID, "Aziz", tg_id, [1], 1)
+    decision = await flow.register_batch(ADMIN_ID, "Aziz", tg_id, [1], 1)
+
+    async with session_factory() as session:
+        batch = await session.get(_Batch, decision.batch_id)
+        if batch is not None:
+            batch.sent_at = _dt.datetime.utcnow() - _dt.timedelta(
+                minutes=screenshot_age_minutes
+            )
+            await session.commit()
     return outcome.case
 
 
