@@ -82,6 +82,7 @@ class ScreenshotFlow:
         message_ids: list[int],
         image_count: int,
         media_ids: list[int] | None = None,
+        reply_to_msg_id: int | None = None,
     ) -> BatchDecision:
         """Admin mijozga tashlagan rasm partiyasini qayd etadi.
 
@@ -101,7 +102,9 @@ class ScreenshotFlow:
             if user is None:
                 return BatchDecision(no_case=True)
 
-            case = await self._get_latest_open_case(session, user.id)
+            case = await self._resolve_case(
+                session, user, reply_to_msg_id, admin_name
+            )
             if case is None:
                 return BatchDecision(no_case=True)
 
@@ -263,6 +266,76 @@ class ScreenshotFlow:
     # ------------------------------------------------------------------ #
     # Ichki yordamchilar
     # ------------------------------------------------------------------ #
+
+    async def _resolve_case(
+        self, session, user: User, reply_to_msg_id: int | None, admin_name: str
+    ) -> Case | None:
+        """Partiya QAYSI nomerga tegishli ekanini aniqlaydi.
+
+        Rasmning o'zida nomer haqida ma'lumot yo'q, shuning uchun mijozda
+        bir nechta ochiq nomer bo'lsa tizim taxmin qila olmaydi. Tartib:
+
+        1. Admin mijozning NOMERLI XABARIGA reply qilgan bo'lsa — aynan
+           o'sha case (`Case.origin_message_id`). Bu yagona ANIQ usul.
+        2. Ochiq case bitta bo'lsa — noaniqlik yo'q, o'sha.
+        3. Bir nechta ochiq case bor va reply yo'q — tizim TAXMIN
+           QILMAYDI: adminga darhol ogohlantirish ketadi va partiya rasm
+           kutayotgan ENG ESKI case'ga yoziladi (admin odatda nomerlarni
+           kelgan tartibda ovoz beradi).
+
+        Avval har doim "oxirgi ochiq case" olinardi — natijada ikkinchi
+        nomer uchun tashlangan rasm BIRINCHI nomer bilan guruhga tushardi.
+        """
+        ochiq = (
+            await session.execute(
+                select(Case)
+                .where(Case.user_id == user.id, Case.status.in_(V2_OPEN_STATUSES))
+                .order_by(Case.id)
+            )
+        ).scalars().all()
+        if not ochiq:
+            return None
+
+        # 1) Reply — aniq ko'rsatma.
+        if reply_to_msg_id is not None:
+            for case in ochiq:
+                if case.origin_message_id == reply_to_msg_id:
+                    return case
+            # Reply bor, lekin nomerli xabarga emas (masalan eski rasmga).
+            # Bu ham noaniqlik — pastdagi shoxga tushadi.
+
+        if len(ochiq) == 1:
+            return ochiq[0]
+
+        # 3) Noaniq — ogohlantiramiz va taxmin qilmasdan eng eskisini olamiz.
+        rasmsiz = [c for c in ochiq if not await self._has_batches(session, c.id)]
+        tanlangan = (rasmsiz or ochiq)[0]
+        nomerlar = ", ".join(
+            f"{format_phone_pretty(c.phone)}"
+            + (" ←" if c.id == tanlangan.id else "")
+            for c in ochiq
+        )
+        await self.alert_sink(
+            f"⚠️ {admin_name}: mijozda {len(ochiq)} ta ochiq nomer bor, rasm esa "
+            f"REPLY'siz tashlandi — tizim qaysi biriga tegishli ekanini "
+            f"bilmaydi.\n\n"
+            f"Nomerlar: {nomerlar}\n"
+            f"Rasm ← belgilangan nomerga yozildi.\n\n"
+            f"To'g'ri bo'lishi uchun: rasmni mijozning KERAKLI NOMERLI "
+            f"xabariga <b>reply</b> qilib tashlang.",
+            True,
+        )
+        return tanlangan
+
+    async def _has_batches(self, session, case_id: int) -> bool:
+        row = (
+            await session.execute(
+                select(ScreenshotBatch.id)
+                .where(ScreenshotBatch.case_id == case_id)
+                .limit(1)
+            )
+        ).scalars().first()
+        return row is not None
 
     async def _get_latest_open_case(self, session, user_id: int) -> Case | None:
         result = await session.execute(

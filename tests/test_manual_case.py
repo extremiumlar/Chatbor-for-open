@@ -230,12 +230,16 @@ async def test_different_phone_while_open_alerts_admin(session_factory, make_man
 
     second = await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, OTHER_PHONE)
 
-    # Mijozga DUPLICATE_ACTIVE matni ketadi (avval tizim jim turardi —
-    # foydalanuvchi qaroriga ko'ra yoqildi, `test_legacy_templates_live.py`).
-    assert second.customer_text
-    assert second.case.id == first.case.id  # yangi case ochilmaydi
+    # Ikkinchi nomer endi O'Z case'ini oladi (avval eski case qaytarilardi
+    # va nomer butunlay yo'qolardi) — `test_multi_number_routing.py`.
+    assert second.customer_text is None
+    assert second.case.id != first.case.id
+    assert second.case.phone == OTHER_PHONE
+    # Admin baribir xabardor bo'lishi kerak: endi ikkita nomer navbatda,
+    # va rasm tashlaganda reply qilishi kerak.
     assert len(alerts) == 1
     assert OTHER_PHONE in alerts[0]
+    assert "REPLY" in alerts[0].upper()
 
 
 @pytest.mark.asyncio

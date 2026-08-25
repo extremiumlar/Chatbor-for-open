@@ -196,6 +196,13 @@ class Case(Base):
         DateTime, nullable=True
     )
 
+    # Mijozning NOMER yozgan xabari id'si (o'sha admin lichkasida).
+    # Nega kerak: mijoz 2-3 nomer yuborsa, admin rasm tashlaganda qaysi
+    # nomerga tegishli ekanini tizim bilmaydi — rasmning o'zida bu ma'lumot
+    # yo'q. Admin o'sha nomerli xabarga REPLY qilib rasm tashlasa,
+    # `reply_to_msg_id` shu ustun orqali case'ga bog'lanadi.
+    origin_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     user: Mapped["User"] = relationship(back_populates="cases")
     attempts: Mapped[list["CouponAttempt"]] = relationship(back_populates="case")
 

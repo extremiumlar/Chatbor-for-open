@@ -55,12 +55,17 @@ V2_ACTIVE_KEYS: tuple[str, ...] = (
     "ALREADY_CONFIRMED",     # §6.1a4 — nomer allaqachon o'tgan
     "RESULT_PASSED",         # §7.2 — o'tdi (avtomatik)
     "RESULT_FAILED",         # §7.2 — o'tmadi (admin tasdiqlagach)
-    # Quyidagi uchtasi v1 merosi edi va TZ v2 ularni ATAYLAB jim
-    # qoldirgandi ("admin o'zi gaplashadi"). Foydalanuvchi qaroriga ko'ra
-    # yoqildi — matnlari allaqachon yozilgan, faqat yuborilmasdi.
-    "DUPLICATE_ACTIVE",      # ochiq murojaat turib BOSHQA nomer kelsa
+    # Quyidagilar v1 merosi edi va TZ v2 ularni ATAYLAB jim qoldirgandi
+    # ("admin o'zi gaplashadi"). Foydalanuvchi qaroriga ko'ra yoqildi —
+    # matnlari allaqachon yozilgan, faqat yuborilmasdi.
     "DUPLICATE_COUPON",      # case'da allaqachon BOSHQA kupon bo'lsa
     "IMAGE_INSTEAD_OF_TEXT",  # nomer matn emas, rasm/ovoz bilan kelsa
+    # DUPLICATE_ACTIVE bir muddat shu ro'yxatda edi, lekin keyin oqim
+    # o'zgardi: mijozning ikkinchi nomeri endi RAD ETILMAYDI, o'z case'ini
+    # oladi (`manual_case.handle_phone_detected`). Ya'ni "oldingi
+    # so'rovingiz hali tugamagan" matni endi YOLG'ON bo'lardi — ikkala
+    # nomer ham navbatda. Shuning uchun u yana o'lik ro'yxatga qaytdi.
+    # (v1 oqimida — `case_manager.py` — hali ishlatiladi.)
 )
 
 V2_LEGACY_KEYS: tuple[str, ...] = tuple(

@@ -44,22 +44,26 @@ async def _seed(session_factory):
 # --------------------------------------------------------------------------- #
 
 
-async def test_second_different_phone_tells_the_customer(session_factory, manager):
-    """Ochiq murojaat turib boshqa nomer kelsa — mijoz sababni bilsin.
+async def test_second_different_phone_now_opens_its_own_case(session_factory, manager):
+    """DUPLICATE_ACTIVE endi YUBORILMAYDI — oqim o'zgardi.
 
-    Avval tizim jim turardi va mijoz kutayotganini bilmay yana nomer
-    yuborishda davom etardi.
+    Bir muddat u yoqilgan edi ("oldingi so'rovingiz hali tugamagan"), lekin
+    keyin ikkinchi nomer rad etilmaydigan bo'ldi: u o'z case'ini oladi va
+    navbatga tushadi. Bunday holatda o'sha matn YOLG'ON bo'lardi.
+    `test_multi_number_routing.py` ga qarang.
     """
     await _seed(session_factory)
-    async with session_factory() as session:
-        await set_template(session, "DUPLICATE_ACTIVE", "Oldingi so'rovingiz tugamagan")
 
-    await manager.handle_phone_detected(ADMIN_ID, TG_ID, None, None, PHONE)
-    outcome = await manager.handle_phone_detected(
+    birinchi = await manager.handle_phone_detected(
+        ADMIN_ID, TG_ID, None, None, PHONE
+    )
+    ikkinchi = await manager.handle_phone_detected(
         ADMIN_ID, TG_ID, None, None, OTHER_PHONE
     )
 
-    assert outcome.customer_text == "Oldingi so'rovingiz tugamagan"
+    assert ikkinchi.customer_text is None
+    assert ikkinchi.case.id != birinchi.case.id, "ikkinchi nomer o'z case'ini olmadi"
+    assert ikkinchi.case.phone == OTHER_PHONE
 
 
 async def test_same_phone_again_stays_silent(session_factory, manager):

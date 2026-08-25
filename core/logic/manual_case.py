@@ -74,8 +74,14 @@ class ManualCaseManager:
         tg_username: str | None,
         display_name: str | None,
         phone: str,
+        message_id: int | None = None,
     ) -> ManualOutcome:
-        """Mijoz lichkasida nomer aniqlanganda (TZ v2 3-bo'lim, T0)."""
+        """Mijoz lichkasida nomer aniqlanganda (TZ v2 3-bo'lim, T0).
+
+        `message_id` — mijozning shu nomerni yozgan xabari id'si. Admin
+        keyinchalik o'sha xabarga reply qilib rasm tashlasa, partiya aynan
+        shu case'ga bog'lanadi (mijoz 2-3 nomer yuborgan holat uchun).
+        """
         async with self.session_factory() as session:
             user = await self._get_or_create_user(
                 session, tg_user_id, tg_username, display_name
@@ -93,22 +99,33 @@ class ManualCaseManager:
                     # O'sha nomer jarayon davomida qayta yozildi — oddiy suhbat,
                     # tizim aralashmaydi (admin o'zi ko'radi).
                     return ManualOutcome(case=latest_case)
-                # Ochiq case turganda BOSHQA nomer keldi. Adminga alert —
-                # u adashib ikki jarayon ochib yubormasligi uchun.
+                # Ochiq case turganda BOSHQA nomer keldi — bu MIJOZNING
+                # IKKINCHI NOMERI (o'zi, oilasi, tanishi uchun).
+                #
+                # Avval bu yerda yangi case OCHILMASDI: tizim eski case'ni
+                # qaytarardi va ikkinchi nomer butunlay yo'qolardi — unga
+                # tekshiruv ham, statistika ham tegishli emasdi. Undan ham
+                # yomoni, admin o'sha nomer uchun rasm tashlaganda partiya
+                # BIRINCHI nomer bilan belgilanardi va guruhga xato caption
+                # tushardi (foydalanuvchi aynan shundan shikoyat qildi:
+                # "2-3 ta nomer tashaydiganlarda adashadi").
+                #
+                # Endi har nomer o'z case'ini oladi. Rasmni to'g'ri nomerga
+                # bog'lash `ScreenshotFlow` da: admin nomerli xabarga reply
+                # qilsa aniq, reply qilmasa admin ogohlantiriladi.
                 await self._alert(
-                    f"Mijoz (tg_id={tg_user_id}) ikkinchi nomer yubordi ({phone}), "
-                    f"lekin {latest_case.short_code or f'#{latest_case.id}'} "
-                    f"({latest_case.phone}) hali ochiq "
-                    f"({latest_case.status.value}).",
+                    f"Mijoz (tg_id={tg_user_id}) ikkinchi nomer yubordi ({phone}). "
+                    f"{latest_case.short_code or f'#{latest_case.id}'} "
+                    f"({latest_case.phone}) hali ochiq — endi ikkalasi ham "
+                    f"navbatda.\n\n"
+                    f"⚠️ Rasm tashlaganda MIJOZNING NOMERLI XABARIGA REPLY "
+                    f"qiling — aks holda tizim qaysi nomerga tegishli ekanini "
+                    f"bilmaydi.",
                     important=True,
                 )
-                # Mijozga ham aytiladi: oldingi murojaati hali tugamagan.
-                # Avval tizim bu yerda JIM turardi (TZ v2 "admin o'zi hal
-                # qiladi" tamoyili), lekin foydalanuvchi qaroriga ko'ra
-                # DUPLICATE_ACTIVE shabloni yoqildi — mijoz kutayotganini
-                # bilmay ikkinchi nomer yuborishda davom etardi.
-                text = await get_template(session, "DUPLICATE_ACTIVE")
-                return ManualOutcome(customer_text=text, case=latest_case)
+                return await self._open_new_case(
+                    session, user, admin_id, phone, message_id
+                )
 
             passed_case = await self._find_passed_case_by_phone(session, phone)
             if passed_case is not None:
@@ -131,7 +148,9 @@ class ManualCaseManager:
                     session, user, admin_id, phone, other_case
                 )
 
-            return await self._open_new_case(session, user, admin_id, phone)
+            return await self._open_new_case(
+                session, user, admin_id, phone, message_id
+            )
 
     async def handle_coupon_detected(
         self, tg_user_id: int, coupon: str, phone: str | None = None
@@ -211,13 +230,19 @@ class ManualCaseManager:
     # ------------------------------------------------------------------ #
 
     async def _open_new_case(
-        self, session, user: User, admin_id: int, phone: str
+        self,
+        session,
+        user: User,
+        admin_id: int,
+        phone: str,
+        message_id: int | None = None,
     ) -> ManualOutcome:
         case = Case(
             user_id=user.id,
             phone=phone,
             status=CaseStatus.NUMBER_RECEIVED,
             assigned_admin_id=admin_id,
+            origin_message_id=message_id,
         )
         # Audit BUG-2 — FAILED'dan keyin qayta yuborilgan nomer YANGI sikl
         # ochadi (§6.1 a4), lekin kupon eski case'da qolib ketardi. Kupon

@@ -246,6 +246,19 @@ _image_hint_sent: dict[tuple[int, int], datetime.datetime] = {}
 _IMAGE_HINT_COOLDOWN_MINUTES = 10
 
 
+def _reply_target(messages: list) -> int | None:
+    """Partiyadagi xabarlardan reply manzilini oladi.
+
+    Albom (bir nechta rasm) tashlanganda reply odatda faqat BIRINCHI
+    xabarda bo'ladi — shuning uchun topilgan birinchisi qaytariladi.
+    """
+    for msg in messages:
+        target = getattr(msg, "reply_to_msg_id", None)
+        if target is not None:
+            return int(target)
+    return None
+
+
 def _media_ids(messages: list) -> list[int]:
     """Partiyadagi har rasmning Telegram media id'sini yig'adi.
 
@@ -435,6 +448,10 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
             [m.id for m in messages],
             len(messages),
             media_ids=_media_ids(messages),
+            # Admin nomerli xabarga reply qilib rasm tashlagan bo'lsa —
+            # partiya aynan o'sha nomerga bog'lanadi. Albomda reply
+            # birinchi xabarda bo'ladi, shuning uchun birinchisidan olamiz.
+            reply_to_msg_id=_reply_target(messages),
         )
 
         if decision.no_case:
@@ -585,7 +602,15 @@ def wire_handlers(client: TelegramClient, admin: Admin) -> None:
             phone = extract_phone(text, operator_codes)
             if phone is not None:
                 outcome = await case_manager.handle_phone_detected(
-                    admin.id, tg_user_id, tg_username, display_name, phone
+                    admin.id,
+                    tg_user_id,
+                    tg_username,
+                    display_name,
+                    phone,
+                    # Xabar id'si saqlanadi: admin keyin SHU xabarga reply
+                    # qilib rasm tashlasa, partiya aynan shu nomerga
+                    # bog'lanadi (mijozda bir nechta nomer bo'lgan holat).
+                    message_id=event.message.id,
                 )
                 # Audit BUG-1 — mijoz nomer va kuponni BITTA xabarda yuborishi
                 # odatiy hol ("901234567 kuponim 123456"). Avval bu yerda
