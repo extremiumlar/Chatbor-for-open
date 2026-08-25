@@ -71,11 +71,11 @@ async def test_batch_registered_status_and_jobs(session_factory, make_flow):
             by_kind.setdefault(j.kind, []).append(j)
         # Rasmsizlik eslatmasi yopilgan (done_at bor).
         assert all(j.done_at is not None for j in by_kind[JobKind.REMIND_NO_SCREENSHOT])
-        # CHECK_DUE ochilgan — rasm vaqtidan +90daq.
+        # CHECK_DUE ochilgan — rasm vaqtidan +70daq (MIN_CHECK_DELAY_MINUTES).
         open_checks = [j for j in by_kind[JobKind.CHECK_DUE] if j.done_at is None]
         assert len(open_checks) == 1
         delta = open_checks[0].due_at - datetime.datetime.utcnow()
-        assert datetime.timedelta(minutes=85) < delta < datetime.timedelta(minutes=95)
+        assert datetime.timedelta(minutes=65) < delta < datetime.timedelta(minutes=75)
 
 
 @pytest.mark.asyncio

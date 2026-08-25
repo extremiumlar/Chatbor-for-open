@@ -127,9 +127,13 @@ class Settings:
         default_factory=lambda: _int_env("NO_SCREENSHOT_FIRST_MINUTES", 30)
     )
 
-    # TZ v2 6.1 — tekshiruvgacha kutish (mijozga aytilgan "1.5 soat").
+    # Tekshiruvgacha kutish. TZ v2 6.1 da 90 daqiqa ("1.5 soat") edi, lekin
+    # foydalanuvchi qaroriga ko'ra 70 daqiqa (1 soat 10 daqiqa) — amaliyotda
+    # ovoz tekshiruvchining bazasiga shu vaqt ichida tushadi.
+    # Pastki chegara `settings_store.MIN_CHECK_DELAY_MINUTES` da (70) —
+    # bu qiymatni undan past qilib bo'lmaydi.
     check_delay_minutes: int = field(
-        default_factory=lambda: _int_env("CHECK_DELAY_MINUTES", 90)
+        default_factory=lambda: _int_env("CHECK_DELAY_MINUTES", 70)
     )
 
     # TZ v2 5.1 — albom bo'lmagan rasmlarni bitta partiya deb hisoblash oynasi.
