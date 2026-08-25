@@ -119,14 +119,12 @@ class Settings:
     # .session fayl; 13.4 — qattiq huquq, backupga kirmaydi).
     sessions_dir: str = os.getenv("SESSIONS_DIR", "./sessions")
 
-    # TZ v2 6.1 a2 — rasmsizlik eslatmasi: birinchisi nomer kelganidan
-    # necha daqiqada, keyin nechta takror (bular .env'da faqat boshlang'ich;
-    # jonli qiymat adminbot orqali settings_store'da).
+    # TZ v2 6.1 a2 — rasmsizlik eslatmasi: BITTA eslatma, nomer kelganidan
+    # necha daqiqada yuboriladi (.env'da faqat boshlang'ich; jonli qiymat
+    # adminbot orqali settings_store'da). Takrorlash/eskalatsiya yo'q —
+    # foydalanuvchi qarori bilan olib tashlangan.
     no_screenshot_first_minutes: int = field(
         default_factory=lambda: _int_env("NO_SCREENSHOT_FIRST_MINUTES", 30)
-    )
-    no_screenshot_reminders: int = field(
-        default_factory=lambda: _int_env("NO_SCREENSHOT_REMINDERS", 3)
     )
 
     # TZ v2 6.1 — tekshiruvgacha kutish (mijozga aytilgan "1.5 soat").

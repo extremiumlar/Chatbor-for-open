@@ -78,7 +78,6 @@ async def set_customer_timeout_seconds(session: AsyncSession, seconds: float) ->
 # --------------------------------------------------------------------------- #
 
 NO_SCREENSHOT_FIRST_KEY = "NO_SCREENSHOT_FIRST_MINUTES"
-NO_SCREENSHOT_REMINDERS_KEY = "NO_SCREENSHOT_REMINDERS"
 CHECK_DELAY_KEY = "CHECK_DELAY_MINUTES"
 GROUP_CHAT_ID_KEY = "GROUP_CHAT_ID"
 IMAGE_BATCH_WINDOW_KEY = "IMAGE_BATCH_WINDOW_SECONDS"
@@ -95,12 +94,6 @@ async def _get_int_setting(session: AsyncSession, key: str, default: int) -> int
 async def get_no_screenshot_first_minutes(session: AsyncSession) -> int:
     return await _get_int_setting(
         session, NO_SCREENSHOT_FIRST_KEY, settings.no_screenshot_first_minutes
-    )
-
-
-async def get_no_screenshot_reminders(session: AsyncSession) -> int:
-    return await _get_int_setting(
-        session, NO_SCREENSHOT_REMINDERS_KEY, settings.no_screenshot_reminders
     )
 
 

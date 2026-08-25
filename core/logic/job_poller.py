@@ -20,11 +20,7 @@ from sqlalchemy import select
 from core.enums import CaseStatus
 from core.logic.check_engine import CheckEngine
 from core.logic.screenshots import format_phone_pretty
-from core.logic.settings_store import (
-    get_daily_report_time,
-    get_no_screenshot_first_minutes,
-    get_no_screenshot_reminders,
-)
+from core.logic.settings_store import get_daily_report_time
 from core.logic.v2_stats import next_daily_report_due_utc
 from core.models import Admin, Case, CheckTrigger, JobKind, ScheduledJob, User
 
@@ -159,7 +155,13 @@ class JobPoller:
     async def _handle_remind(
         self, job_id: int, case_id: int | None, payload: str
     ) -> None:
-        """§6.1 a2 — rasmsizlik eslatmasi (kupon holatiga qarab 2 xil matn)."""
+        """§6.1 a2 — rasmsizlik eslatmasi (kupon holatiga qarab 2 xil matn).
+
+        Foydalanuvchi qarori: FAQAT BITTA eslatma yuboriladi — takrorlash
+        (3 martagacha) va undan keyin superadminga eskalatsiya qilish
+        ishlatilmagani uchun olib tashlandi. Case ochiq qoladi, admin
+        rasm tashlaguncha yoki `/check` qilguncha kutadi.
+        """
         if case_id is None:
             return
         async with self.session_factory() as session:
@@ -174,11 +176,8 @@ class JobPoller:
                 else None
             )
             if admin is not None and not admin.is_active:
-                # §4.2b — nofaol admin: eslatmalar ham muzlatiladi.
+                # §4.2b — nofaol admin: eslatma ham muzlatiladi.
                 return
-            reminder_no = int(json.loads(payload or "{}").get("reminder_no", 1))
-            limit = await get_no_screenshot_reminders(session)
-            interval = await get_no_screenshot_first_minutes(session)
 
             admin_name = admin.name if admin else "?"
             customer = (
@@ -190,43 +189,15 @@ class JobPoller:
                 # Kupon bor = mijoz allaqachon ovoz bergan.
                 text = (
                     f"⚠️ {admin_name}: {customer} ({phone}) kupon raqamini "
-                    f"yubordi — siz rasm tashlashni unutdingiz. "
-                    f"({reminder_no}/{limit}-eslatma)"
+                    f"yubordi — siz rasm tashlashni unutdingiz."
                 )
             else:
                 # Kupon yo'q = mijoz hali ovoz bermagan.
                 text = (
                     f"⚠️ {admin_name}: {customer} ({phone}) nomer yubordi — "
-                    f"uning ovozini ham olib qo'ying. "
-                    f"({reminder_no}/{limit}-eslatma)"
+                    f"uning ovozini ham olib qo'ying."
                 )
             await self.alert_sink(text, True)
-
-            if reminder_no < limit:
-                session.add(
-                    ScheduledJob(
-                        kind=JobKind.REMIND_NO_SCREENSHOT,
-                        case_id=case.id,
-                        due_at=datetime.datetime.utcnow()
-                        + datetime.timedelta(minutes=interval),
-                        payload=json.dumps({"reminder_no": reminder_no + 1}),
-                    )
-                )
-                await session.commit()
-            else:
-                # §6.1 a2 — eslatmalar tugadi: superadminga o'tadi, case
-                # OCHIQ qoladi (yopilmaydi), statistikada "tashlab ketilgan".
-                coupon_note = (
-                    "Kupon: bor (mijoz ovoz bergan)."
-                    if case.coupon is not None
-                    else "Kupon: yo'q (mijoz hali ovoz bermagan)."
-                )
-                await self.alert_sink(
-                    f"🔴 {admin_name} {limit} ta eslatmaga javob bermadi — "
-                    f"{customer} ({phone}), {case.short_code or case.id}. "
-                    f"{coupon_note} Case ochiq qoladi — qaror superadminda.",
-                    True,
-                )
 
     # ------------------------------------------------------------------ #
     # Ish holati

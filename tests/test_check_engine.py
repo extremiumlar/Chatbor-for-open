@@ -494,8 +494,9 @@ async def test_poller_check_due_triggers_auto_check(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_poller_remind_two_variants_and_escalation(session_factory):
-    """§6.1 a2 — kupon bor/yo'q — 2 xil matn; limitdan keyin superadmin."""
+async def test_poller_remind_once_no_repeat_or_escalation(session_factory):
+    """§6.1 a2 — kupon bor/yo'q — 2 xil matn. Foydalanuvchi qarori:
+    FAQAT BITTA eslatma, takrorlash va superadmin eskalatsiyasi yo'q."""
     async with session_factory() as session:
         session.add(Admin(id=ADMIN_ID, tg_user_id=901, name="Aziz"))
         await session.commit()
@@ -530,18 +531,12 @@ async def test_poller_remind_two_variants_and_escalation(session_factory):
             await session.commit()
         await poller.tick()
 
-    # 1-eslatma: kupon YO'Q — "ovozini ham olib qo'ying".
+    # Kupon YO'Q holatida matn — "ovozini ham olib qo'ying".
     await _fire_due_reminder()
     assert any("ovozini ham olib qo'ying" in a for a in alerts)
 
-    # Kupon keladi — endi matn "rasm tashlashni unutdingiz" bo'ladi.
-    await manager.handle_coupon_detected(TG_ID, "123456")
-    await _fire_due_reminder()
-    assert any("rasm tashlashni unutdingiz" in a for a in alerts)
-
-    # 3-eslatma (limit=3) — keyin superadmin eskalatsiyasi.
-    await _fire_due_reminder()
-    assert any("javob bermadi" in a for a in alerts)
+    # Takrorlanmaydi va superadminga eskalatsiya bo'lmaydi — navbatdagi
+    # eslatma job'i umuman yaratilmaydi, case OCHIQ qoladi.
     async with session_factory() as session:
         db_case = await session.get(Case, outcome.case.id)
         open_jobs = (
@@ -557,7 +552,48 @@ async def test_poller_remind_two_variants_and_escalation(session_factory):
             .all()
         )
     assert db_case.status == CaseStatus.NUMBER_RECEIVED  # case OCHIQ qoladi
-    assert open_jobs == []  # eslatmalar tugadi
+    assert open_jobs == []  # keyingi eslatma rejalashtirilmagan
+    assert not any("javob bermadi" in a for a in alerts)  # eskalatsiya yo'q
+
+
+@pytest.mark.asyncio
+async def test_reminder_text_reflects_coupon_state_at_send_time(session_factory):
+    """Kupon eslatmadan OLDIN kelsa — matn "rasm tashlashni unutdingiz"
+    bo'lishi kerak (kupon YO'Q holatidagi matn emas)."""
+    async with session_factory() as session:
+        session.add(Admin(id=ADMIN_ID, tg_user_id=901, name="Aziz"))
+        await session.commit()
+
+    manager = ManualCaseManager(session_factory=session_factory)
+    await manager.handle_phone_detected(ADMIN_ID, TG_ID, "u", "M", PHONE)
+    await manager.handle_coupon_detected(TG_ID, "123456")
+
+    alerts: list[str] = []
+
+    async def capture(message: str, important: bool = True) -> None:
+        alerts.append(message)
+
+    engine = _make_engine(session_factory, alert=capture)
+    poller = JobPoller(session_factory, engine, capture, poll_seconds=999)
+
+    async with session_factory() as session:
+        job = (
+            (
+                await session.execute(
+                    select(ScheduledJob).where(
+                        ScheduledJob.kind == JobKind.REMIND_NO_SCREENSHOT,
+                        ScheduledJob.done_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        job.due_at = datetime.datetime.utcnow() - datetime.timedelta(minutes=1)
+        await session.commit()
+    await poller.tick()
+
+    assert any("rasm tashlashni unutdingiz" in a for a in alerts)
 
 
 @pytest.mark.asyncio

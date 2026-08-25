@@ -40,7 +40,6 @@ fonda kuzatib, qora ishlarni o'zi qiladi. Sizdan faqat 3 narsa:
   bergan, faqat rasm qoldi. Rasm tashlang, tamom.
 - *"...nomer yubordi — uning ovozini ham olib qo'ying"* — mijoz hali ovoz
   bermagan. Ovozini oling, keyin rasm tashlang.
-- 3 marta e'tiborsiz qoldirsangiz — superadminga boradi.
 
 ### Statistikangiz
 
@@ -101,7 +100,6 @@ fonda kuzatib, qora ishlarni o'zi qiladi. Sizdan faqat 3 narsa:
 | 🔴 "...sessiyasi BEKOR QILINGAN" | Admin sessiyani o'chirgan/parol o'zgargan. **Mijozlari kuzatilmayapti!** | Serverda `python -m scripts.add_admin_session` bilan qayta login + restart |
 | ⏳ "Tekshiruvchi javob bermayapti" | 30+ daqiqa javobsiz | Tekshiruvchiga qo'ng'iroq qiling; kerak bo'lsa `/setchecker` bilan almashtiring |
 | ⚠️ "DUBLIKAT: ... ikki admin" | Bir nomerga ikki marta rasm | Adminlar bilan gaplashing — kim davom etadi |
-| 🔴 "...3 ta eslatmaga javob bermadi" | Admin mijozni tashlab qo'ygan | Adminni turting yoki o'zingiz hal qiling; case ochiq qoladi |
 | ⚠️ "Kech javob keldi..." | Natija avval xato yopilgan, tizim to'g'irladi | Adminning mijozdan uzr so'raganini nazorat qiling |
 | ⚠️ "Guruhda reaksiya qo'yib bo'lmadi" | Guruh sozlamasida reaksiyalar yopilgan | Guruh sozlamalaridan reaksiyalarni oching |
 
