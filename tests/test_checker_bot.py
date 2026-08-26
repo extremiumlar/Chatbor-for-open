@@ -50,11 +50,18 @@ class _Xabar:
         )
 
 
-# Jonli botdan olingan HAQIQIY tugmalar.
-_RO_YXAT = [("📋 #1 · 9088 ovoz", b"project:view:p1"), ("➕ Loyiha qo'shish", b"project:add")]
+# Jonli botdan olingan HAQIQIY tugmalar. callback_data ATAYLAB "p1" formatida
+# EMAS (2026-08-25 jonli xato: bu formatni taxmin qilib, oxiri xato chiqqan
+# edi) — moslash endi TUGMA MATNI ("#1") bo'yicha, callback_data qanday
+# bo'lishidan qat'i nazar ishlashi kerak.
+_RO_YXAT = [
+    ("📋 #1 · 9088 ovoz", b"cb_a1b2"),
+    ("➕ Loyiha qo'shish", b"project:add"),
+    ("🗑 Loyiha o'chirish", b"project:del"),
+]
 _KARTOCHKA = [
-    ("📩 Excel", b"project_action:excel:p1"),
-    ("🔍 Tekshirish", b"project_action:check:p1"),
+    ("📩 Excel", b"cb_x1"),
+    ("🔍 Tekshirish", b"cb_check_9"),
     ("⬅️ Loyihalarimga", b"menu:projects"),
 ]
 
@@ -90,7 +97,7 @@ class _SoxtaKlient:
     async def __call__(self, request):
         data = request.data
         self.bosilgan.append(data)
-        if data == b"project:view:p1":
+        if data == b"cb_a1b2":
             hedef = next(m for m in self.xabarlar if m.id == request.msg_id)
             if self.tahrirlaydi:
                 # HAQIQIY xatti-harakat: xabar tahrirlanadi.
@@ -100,7 +107,7 @@ class _SoxtaKlient:
                 )
             else:
                 self._qo_sh("📋 Loyiha ma'lumotlari", _KARTOCHKA)
-        elif data == b"project_action:check:p1":
+        elif data == b"cb_check_9":
             self._qo_sh("🔍 Ovoz tekshirish\n\nTelefon raqamni kiriting.")
         return object()
 
@@ -134,10 +141,19 @@ def test_message_without_keyboard():
     assert _buttons(_Xabar(1, "x")) == []
 
 
-def test_find_button_by_callback_data():
+def test_find_button_by_text():
+    """Qidiruv TUGMA MATNI bo'yicha — callback_data qanday bo'lishidan
+    qat'iy nazar (2026-08-25 jonli xato shu farqni ochdi)."""
     m = _Xabar(1, "x", _KARTOCHKA)
-    assert _find_button(m, b"project_action:check:p1") == b"project_action:check:p1"
-    assert _find_button(m, b"yo'q-bunday") is None
+    assert _find_button(m, "Tekshir") == b"cb_check_9"
+    assert _find_button(m, "yo'q-bunday-matn") is None
+
+
+def test_find_button_ignores_callback_data_format():
+    """Loyiha tugmasi "#1" matni bilan topiladi, callback_data "p1" bo'lishi
+    SHART emas."""
+    m = _Xabar(1, "x", _RO_YXAT)
+    assert _find_button(m, "#1") == b"cb_a1b2"
 
 
 # --------------------------------------------------------------------------- #
@@ -147,21 +163,21 @@ def test_find_button_by_callback_data():
 
 async def test_full_navigation_sends_the_number():
     klient = _SoxtaKlient()
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     natija = await nav.send_number("998901234567")
 
     assert natija is not None
     # Tartib muhim: avval menyu, keyin nomer.
     assert klient.yuborilgan == ["📁 Loyihalar", "998901234567"]
-    assert klient.bosilgan == [b"project:view:p1", b"project_action:check:p1"]
+    assert klient.bosilgan == [b"cb_a1b2", b"cb_check_9"]
 
 
 async def test_works_when_bot_edits_instead_of_replying():
     """Loyiha tugmasi bosilganda bot xabarni TAHRIRLAYDI — yangi xabar
     kutilsa navigatsiya osilib qolardi."""
     klient = _SoxtaKlient(tahrirlaydi=True)
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     assert await nav.send_number("998901234567") is not None
 
@@ -170,20 +186,20 @@ async def test_every_number_repeats_the_whole_cycle():
     """Bot javob bergach tekshirish rejimidan chiqadi — keyingi nomer
     uchun menyudan qaytadan o'tish SHART."""
     klient = _SoxtaKlient()
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     await nav.send_number("998901111111")
     await nav.send_number("998902222222")
 
     assert klient.yuborilgan.count("📁 Loyihalar") == 2
-    assert klient.bosilgan.count(b"project_action:check:p1") == 2
+    assert klient.bosilgan.count(b"cb_check_9") == 2
 
 
 async def test_requests_are_serialised():
     """Bot HOLATLI: ikki sikl aralashsa, ikkinchisi birinchisining
     "nomer kutish" holatini o'g'irlab, javoblar chalkashib ketardi."""
     klient = _SoxtaKlient()
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     await asyncio.gather(
         nav.send_number("998901111111"), nav.send_number("998902222222")
@@ -210,7 +226,7 @@ async def test_missing_project_button_raises():
         return _Xabar(99, text, out=True)
 
     klient.send_message = bo_sh_royxat
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     with pytest.raises(CheckerBotError, match="loyihasi tugmasi topilmadi"):
         await nav.send_number("998901234567")
@@ -225,7 +241,7 @@ async def test_silent_bot_raises():
         return _Xabar(99, text, out=True)
 
     klient.send_message = jim
-    nav = CheckerBotNavigator(klient, "bot", "p1")
+    nav = CheckerBotNavigator(klient, "bot", "1")
 
     with pytest.raises(CheckerBotError, match="javob bermadi"):
         await nav.send_number("998901234567")

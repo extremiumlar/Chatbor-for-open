@@ -204,8 +204,11 @@ async def set_checker_relay_admin_id(session: AsyncSession, admin_id: int) -> No
 
 
 async def get_checker_bot_project(session: AsyncSession) -> str:
-    """Bot menyusidagi loyiha kaliti (`project:view:<slug>` dagi slug)."""
-    return (await get_setting(session, CHECKER_BOT_PROJECT_KEY, "p1")).strip() or "p1"
+    """Bot menyusidagi loyiha RAQAMI — tugma matnida "#<raqam>" qilib
+    ko'rinadi (masalan "#1"). Ichki callback_data emas — u bot tomonidan
+    o'zgarishi mumkin, matn esa barqaror (2026-08-25 jonli xato: "p1"
+    degan noto'g'ri taxmin ishlatilgan edi)."""
+    return (await get_setting(session, CHECKER_BOT_PROJECT_KEY, "1")).strip() or "1"
 
 
 async def get_drip_interval_seconds(session: AsyncSession) -> float:

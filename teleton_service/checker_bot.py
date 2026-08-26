@@ -8,10 +8,10 @@ Jonli o'rganish natijasi (2026-08-25), har nomer uchun to'liq sikl:
 
     1. "📁 Loyihalar" matni yuboriladi
          -> "📁 Loyihalarim (N ta)" ro'yxati,
-            tugma: '📋 #1 · 9088 ovoz'   data=project:view:p1
+            tugma: '📋 #1 · 9088 ovoz'
     2. loyiha tugmasi bosiladi (bot XABARNI TAHRIRLAYDI, yangisini yubormaydi)
          -> "📋 Loyiha ma'lumotlari",
-            tugma: '🔍 Tekshirish'       data=project_action:check:p1
+            tugma: '🔍 Tekshirish'
     3. "Tekshirish" bosiladi
          -> YANGI xabar: "🔍 Ovoz tekshirish ... raqamni kiriting"
     4. nomer matn bo'lib yuboriladi
@@ -24,6 +24,14 @@ uchun sikl HAR NOMER uchun to'liq takrorlanadi.
 Shuningdek: bot BITTA akkaunt bilan ishlaydi (obuna o'sha akkauntga
 bog'langan), shuning uchun barcha so'rovlar bitta "relay" adminining
 akkauntidan ketadi — case qaysi adminniki bo'lishidan qat'i nazar.
+
+MUHIM (2026-08-25, jonli xato tuzatildi): loyiha tugmasi ICHKI
+callback_data (masalan "project:view:p1") emas, TUGMA MATNIDAGI "#1"
+bo'yicha qidiriladi. Sabab: callback_data formatini biz nazorat
+qilmaymiz, bot tomonidan istalgan payt o'zgarishi mumkin — "p1" degan
+slug shunchaki noto'g'ri taxmin bo'lib chiqdi (haqiqiy loyiha "#1" deb
+ko'rsatilar ekan). Matn esa foydalanuvchiga ko'rinadigan, barqaror
+belgi.
 """
 
 import asyncio
@@ -56,10 +64,18 @@ def _buttons(message):
     return chiqdi
 
 
-def _find_button(message, needle: bytes):
-    """`callback_data` ichida `needle` bo'lgan birinchi tugma."""
-    for _, data in _buttons(message):
-        if needle in data:
+def _find_button(message, needle: str):
+    """Tugma MATNI ichida `needle` (masalan "#1") bo'lsa — callback_data'si.
+
+    Qidiruv `callback_data` emas, TUGMA MATNI bo'yicha: ichki
+    callback_data formati botning o'zi tomonidan istalgan payt
+    o'zgarishi mumkin (masalan "project:view:p1" -> "project:view:1"),
+    biz buni bilmaymiz va nazorat qila olmaymiz. Foydalanuvchiga
+    ko'rinadigan matn ("#1 · N ovoz") esa barqaror — jonli xato aynan
+    shu farq tufayli yuz berdi (loyiha "p1" emas, "#1" deb ko'rsatilgan).
+    """
+    for text, data in _buttons(message):
+        if needle in text:
             return data
     return None
 
@@ -121,11 +137,13 @@ class CheckerBotNavigator:
                 raise CheckerBotError("bot 'Loyihalar' ga javob bermadi")
 
             # 2-qadam — loyihani ochish. Bot javob o'rniga SHU xabarni
-            # tahrirlaydi, shuning uchun yangi xabar kutilmaydi.
-            loyiha = _find_button(ro_yxat, f"project:view:{self.project_slug}".encode())
+            # tahrirlaydi, shuning uchun yangi xabar kutilmaydi. Tugma
+            # MATNI ("#1 · N ovoz") bo'yicha qidiriladi — callback_data
+            # ichki formatini bilmaymiz va u o'zgarishi mumkin.
+            loyiha = _find_button(ro_yxat, f"#{self.project_slug}")
             if loyiha is None:
                 raise CheckerBotError(
-                    f"'{self.project_slug}' loyihasi tugmasi topilmadi: "
+                    f"'#{self.project_slug}' loyihasi tugmasi topilmadi: "
                     f"{[t for t, _ in _buttons(ro_yxat)]}"
                 )
             await self._bos(ro_yxat, loyiha)
@@ -136,10 +154,10 @@ class CheckerBotNavigator:
             if kartochka is None:
                 raise CheckerBotError("loyiha kartochkasi o'qilmadi")
 
-            # 3-qadam — "Tekshirish".
-            tekshir = _find_button(
-                kartochka, f"project_action:check:{self.project_slug}".encode()
-            )
+            # 3-qadam — "Tekshirish". Bu ham matn bo'yicha: loyiha
+            # kartochkasida bitta shu turdagi tugma bo'ladi, slug shart
+            # emas.
+            tekshir = _find_button(kartochka, "Tekshir")
             if tekshir is None:
                 raise CheckerBotError(
                     f"'Tekshirish' tugmasi topilmadi: "
