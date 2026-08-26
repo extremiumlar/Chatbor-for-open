@@ -133,18 +133,50 @@ async def test_request_check_queues_and_cancels_check_due(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_request_check_no_duplicate(session_factory):
+async def test_request_check_auto_does_not_duplicate(session_factory):
+    """AUTO uchun dublikat himoyasi qat'iy qoladi — CHECK_DUE ikki marta
+    ishga tushib, ikkita so'rov yubormasin."""
     await _seed_ready(session_factory)
     case = await _open_case_with_screenshots(session_factory)
     engine = _make_engine(session_factory)
 
-    await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
-    msg = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
+    await engine.request_check(case.id, CheckTrigger.AUTO, ADMIN_ID)
+    msg = await engine.request_check(case.id, CheckTrigger.AUTO, ADMIN_ID)
 
     assert "allaqachon" in msg
     async with session_factory() as session:
         requests = (await session.execute(select(CheckRequest))).scalars().all()
     assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_check_supersedes_a_stuck_open_request(session_factory):
+    """Foydalanuvchi qarori: qo'lda /check "navbatda" deb to'xtatilmasin —
+    admin qayta bossa, eskisi (osilib qolgan) bekor qilinib, YANGI so'rov
+    darhol yuboriladi."""
+    await _seed_ready(session_factory)
+    case = await _open_case_with_screenshots(session_factory)
+    engine = _make_engine(session_factory)
+
+    first_msg = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
+    assert "navbatga qo'yildi" in first_msg
+
+    second_msg = await engine.request_check(case.id, CheckTrigger.MANUAL, ADMIN_ID)
+    assert "allaqachon" not in second_msg
+    assert "navbatga qo'yildi" in second_msg
+
+    async with session_factory() as session:
+        requests = (
+            (await session.execute(select(CheckRequest).order_by(CheckRequest.id)))
+            .scalars()
+            .all()
+        )
+    assert len(requests) == 2
+    # Eskisi yopilgan (javob kutilmaydi), lekin natija emas — bekor qilingan.
+    assert requests[0].replied_at is not None
+    assert requests[0].result == CheckResult.NO_REPLY
+    # Yangisi hali ochiq — javob kutmoqda.
+    assert requests[1].replied_at is None
 
 
 # --------------------------------------------------------------------------- #

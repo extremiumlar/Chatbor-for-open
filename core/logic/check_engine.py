@@ -116,9 +116,22 @@ class CheckEngine:
             # Dublikat himoyasi: shu case uchun ochiq so'rov bormi.
             open_req = await self._find_open_request_for_case(session, case.id)
             if open_req is not None:
-                return "Bu case uchun so'rov allaqachon navbatda."
+                if trigger != CheckTrigger.MANUAL:
+                    # AUTO uchun qat'iy qoladi — CHECK_DUE ikki marta ishga
+                    # tushib, ikkita so'rov yubormasin.
+                    return "Bu case uchun so'rov allaqachon navbatda."
+                # Foydalanuvchi qarori: qo'lda /check "navbatda" deb
+                # to'xtatilmasin — admin ANIQ hozir tezlashtirmoqchi.
+                # Eskisi (osilib qolgan yoki hali javob kelmagan so'rov)
+                # bekor qilinadi, o'rniga YANGI so'rov darhol yuboriladi.
+                open_req.result = CheckResult.NO_REPLY
+                open_req.raw_reply = (
+                    "Qo'lda /check bilan qayta so'ralgani uchun bekor qilindi."
+                )
 
             now = datetime.datetime.utcnow()
+            if open_req is not None:
+                open_req.replied_at = now
 
             # 70 DAQIQA CHEGARASI — ikkala yo'lda ham amal qiladi.
             #
